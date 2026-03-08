@@ -1,5 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub type ForgeResult<T> = Result<T, ValidationError>;
@@ -179,6 +180,49 @@ pub struct TodaySummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthResponse {
     pub status: String,
+    pub api_base_url: String,
+    pub paths: ForgePaths,
+    pub started_at: String,
+    pub first_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForgePaths {
+    pub root: PathBuf,
+    pub database: PathBuf,
+    pub config: PathBuf,
+    pub logs: PathBuf,
+    pub daemon_log: PathBuf,
+}
+
+impl ForgePaths {
+    pub fn discover() -> ForgeResult<Self> {
+        let home = dirs::home_dir()
+            .ok_or_else(|| ValidationError::new("failed to locate user home directory"))?;
+        Ok(Self::from_root(home.join(".forge")))
+    }
+
+    pub fn from_root(root: PathBuf) -> Self {
+        Self {
+            database: root.join("forge.db"),
+            config: root.join("config.toml"),
+            logs: root.join("logs"),
+            daemon_log: root.join("logs").join("forged.log"),
+            root,
+        }
+    }
+
+    pub fn database_url(&self) -> String {
+        sqlite_url_from_path(&self.database)
+    }
+
+    pub fn api_base_url(&self, host: &str, port: u16) -> String {
+        format!("http://{host}:{port}")
+    }
+
+    pub fn health_url(&self, host: &str, port: u16) -> String {
+        format!("{}/health", self.api_base_url(host, port))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,4 +460,9 @@ pub fn require_non_empty(value: &str, field: &str) -> ForgeResult<()> {
     } else {
         Ok(())
     }
+}
+
+fn sqlite_url_from_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    format!("sqlite://{raw}")
 }

@@ -870,6 +870,7 @@ name = "domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dirs",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1133,6 +1134,7 @@ dependencies = [
  "domain",
  "persistence-sqlite",
  "reqwest 0.12.28",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

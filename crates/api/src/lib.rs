@@ -10,14 +10,32 @@ use axum::{
 };
 use domain::{
     CalendarRangeQuery, CreateEventRequest, CreateProjectRequest, CreateTaskRequest, EventListQuery,
-    SetFocusRequest, TaskListQuery, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest,
+    ForgePaths, HealthResponse, SetFocusRequest, TaskListQuery, UpdateEventRequest,
+    UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST, DEFAULT_API_PORT,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-pub type ApiState = Arc<ForgeService>;
+#[derive(Clone)]
+pub struct ApiState {
+    service: Arc<ForgeService>,
+    health: HealthResponse,
+}
+
+type SharedState = Arc<ApiState>;
 
 pub fn router(service: ForgeService) -> Router {
+    let health_response = HealthResponse {
+        status: "ok".to_string(),
+        api_base_url: format!("http://{DEFAULT_API_HOST}:{DEFAULT_API_PORT}"),
+        paths: ForgePaths::from_root(std::path::PathBuf::new()),
+        started_at: domain::now_timestamp(),
+        first_run: false,
+    };
+    router_with_health(service, health_response)
+}
+
+pub fn router_with_health(service: ForgeService, health_response: HealthResponse) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/today", get(today))
@@ -42,7 +60,10 @@ pub fn router(service: ForgeService) -> Router {
         .route("/focus", get(get_focus).post(set_focus).delete(clear_focus))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(Arc::new(service))
+        .with_state(Arc::new(ApiState {
+            service: Arc::new(service),
+            health: health_response,
+        }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,162 +76,163 @@ struct ClearDoneResponse {
     cleared: u64,
 }
 
-async fn health(State(service): State<ApiState>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.health().await?))
+async fn health(State(state): State<SharedState>) -> ApiResult<impl IntoResponse> {
+    state.service.health().await?;
+    Ok(Json(state.health.clone()))
 }
 
-async fn today(State(service): State<ApiState>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.today().await?))
+async fn today(State(state): State<SharedState>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.service.today().await?))
 }
 
 async fn calendar_range(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Query(query): Query<CalendarRangeQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.calendar_range(query).await?))
+    Ok(Json(state.service.calendar_range(query).await?))
 }
 
 async fn list_projects(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Query(query): Query<ProjectListQuery>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(
-        service
+        state.service
             .list_projects(query.include_archived.unwrap_or(false))
             .await?,
     ))
 }
 
 async fn get_project(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.get_project(id).await?))
+    Ok(Json(state.service.get_project(id).await?))
 }
 
 async fn create_project(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Json(payload): Json<CreateProjectRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok((StatusCode::CREATED, Json(service.create_project(payload).await?)))
+    Ok((StatusCode::CREATED, Json(state.service.create_project(payload).await?)))
 }
 
 async fn update_project(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateProjectRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.update_project(id, payload).await?))
+    Ok(Json(state.service.update_project(id, payload).await?))
 }
 
 async fn delete_project(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    service.delete_project(id).await?;
+    state.service.delete_project(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_tasks(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Query(query): Query<TaskListQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.list_tasks(query).await?))
+    Ok(Json(state.service.list_tasks(query).await?))
 }
 
 async fn get_task(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.get_task(id).await?))
+    Ok(Json(state.service.get_task(id).await?))
 }
 
 async fn create_task(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Json(payload): Json<CreateTaskRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok((StatusCode::CREATED, Json(service.create_task(payload).await?)))
+    Ok((StatusCode::CREATED, Json(state.service.create_task(payload).await?)))
 }
 
 async fn update_task(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateTaskRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.update_task(id, payload).await?))
+    Ok(Json(state.service.update_task(id, payload).await?))
 }
 
 async fn delete_task(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    service.delete_task(id).await?;
+    state.service.delete_task(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn complete_task(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.complete_task(id).await?))
+    Ok(Json(state.service.complete_task(id).await?))
 }
 
-async fn clear_done_tasks(State(service): State<ApiState>) -> ApiResult<impl IntoResponse> {
+async fn clear_done_tasks(State(state): State<SharedState>) -> ApiResult<impl IntoResponse> {
     Ok(Json(ClearDoneResponse {
-        cleared: service.clear_done_tasks().await?,
+        cleared: state.service.clear_done_tasks().await?,
     }))
 }
 
 async fn list_events(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Query(query): Query<EventListQuery>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.list_events(query).await?))
+    Ok(Json(state.service.list_events(query).await?))
 }
 
 async fn get_event(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.get_event(id).await?))
+    Ok(Json(state.service.get_event(id).await?))
 }
 
 async fn create_event(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Json(payload): Json<CreateEventRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok((StatusCode::CREATED, Json(service.create_event(payload).await?)))
+    Ok((StatusCode::CREATED, Json(state.service.create_event(payload).await?)))
 }
 
 async fn update_event(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
     Json(payload): Json<UpdateEventRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.update_event(id, payload).await?))
+    Ok(Json(state.service.update_event(id, payload).await?))
 }
 
 async fn delete_event(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
-    service.delete_event(id).await?;
+    state.service.delete_event(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_focus(State(service): State<ApiState>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.get_focus().await?))
+async fn get_focus(State(state): State<SharedState>) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.service.get_focus().await?))
 }
 
 async fn set_focus(
-    State(service): State<ApiState>,
+    State(state): State<SharedState>,
     Json(payload): Json<SetFocusRequest>,
 ) -> ApiResult<impl IntoResponse> {
-    Ok(Json(service.set_focus(payload).await?))
+    Ok(Json(state.service.set_focus(payload).await?))
 }
 
-async fn clear_focus(State(service): State<ApiState>) -> ApiResult<impl IntoResponse> {
-    service.clear_focus().await?;
+async fn clear_focus(State(state): State<SharedState>) -> ApiResult<impl IntoResponse> {
+    state.service.clear_focus().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -3,7 +3,7 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz as ChronoTz;
 use domain::{
     CalendarOccurrence, CalendarRangeQuery, CreateEventRequest, CreateProjectRequest,
-    CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult, HealthResponse,
+    CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult,
     Project, ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus,
     TodaySummary, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, ValidationError,
     parse_rfc3339, require_non_empty,
@@ -48,11 +48,9 @@ impl ForgeService {
     }
 
     #[instrument(skip(self))]
-    pub async fn health(&self) -> AppResult<HealthResponse> {
+    pub async fn health(&self) -> AppResult<()> {
         self.store.health_check().await.map_err(Self::map_store_error)?;
-        Ok(HealthResponse {
-            status: "ok".to_string(),
-        })
+        Ok(())
     }
 
     #[instrument(skip(self))]
