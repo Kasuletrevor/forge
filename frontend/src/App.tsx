@@ -55,6 +55,7 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
 import { useToast } from './components/ui/use-toast'
+import { invalidateForgeQueries } from './lib/query'
 import type {
   CreateEventRequest,
   CreateProjectRequest,
@@ -322,12 +323,7 @@ export default function App() {
     return () => draggable.destroy()
   }, [unscheduledTasks])
 
-  const invalidate = () =>
-    Promise.all(
-      ['projects', 'tasks', 'events', 'today', 'calendar'].map((key) =>
-        queryClient.invalidateQueries({ queryKey: [key] }),
-      ),
-    )
+  const invalidate = () => invalidateForgeQueries(queryClient)
 
   function notifyError(title: string, error: unknown) {
     toast({

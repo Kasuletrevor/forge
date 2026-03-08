@@ -15,3 +15,10 @@ serde_json.workspace = true
 serde_urlencoded.workspace = true
 tokio.workspace = true
 urlencoding.workspace = true
+
+[dev-dependencies]
+api = { path = "../../crates/api" }
+app = { path = "../../crates/app" }
+axum.workspace = true
+persistence-sqlite = { path = "../../crates/persistence-sqlite" }
+tempfile.workspace = true

@@ -279,7 +279,10 @@ struct FocusSetArgs {
 async fn main() -> Result<()> {
     let cli = ForgeCli::parse();
     let api = ForgeApi::connect().await?;
+    run(cli, &api).await
+}
 
+async fn run(cli: ForgeCli, api: &ForgeApi) -> Result<()> {
     match cli.command {
         Commands::Today => print_today(&api.get_today().await?),
         Commands::Project {
@@ -1105,5 +1108,492 @@ fn localize(value: NaiveDateTime) -> Result<chrono::DateTime<Local>> {
         LocalResult::Single(dt) => Ok(dt),
         LocalResult::Ambiguous(dt, _) => Ok(dt),
         LocalResult::None => bail!("local timestamp does not exist: {value}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use app::ForgeService;
+    use axum::serve;
+    use domain::{CreateEventRequest, CreateProjectRequest, CreateTaskRequest, EventType, TaskPriority};
+    use persistence_sqlite::SqliteStore;
+    use tempfile::tempdir;
+    use tokio::{net::TcpListener, task::JoinHandle};
+
+    struct TestHarness {
+        service: ForgeService,
+        api: ForgeApi,
+        server: JoinHandle<()>,
+    }
+
+    impl Drop for TestHarness {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    async fn harness() -> TestHarness {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("forge-cli-test.db");
+        let url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+        let store = SqliteStore::new(&url).await.expect("sqlite store");
+        store.run_migrations().await.expect("migrations");
+        std::mem::forget(temp);
+
+        let service = ForgeService::new(store);
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            serve(listener, api::router(server_service))
+                .await
+                .expect("server");
+        });
+
+        let api = ForgeApi {
+            client: Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("client"),
+            base_url: format!("http://{}", addr),
+        };
+
+        TestHarness {
+            service,
+            api,
+            server,
+        }
+    }
+
+    #[tokio::test]
+    async fn project_edit_command_updates_project() {
+        let harness = harness().await;
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Forge".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#6f8466".to_string(),
+            })
+            .await
+            .expect("project");
+        let project_id = project.id.to_string();
+
+        run(
+            ForgeCli::parse_from([
+                "forge",
+                "project",
+                "edit",
+                project_id.as_str(),
+                "--name",
+                "Forge Prime",
+                "--description",
+                "core system",
+                "--color",
+                "#123456",
+                "--status",
+                "paused",
+                "--tag",
+                "phase2",
+            ]),
+            &harness.api,
+        )
+        .await
+        .expect("run project edit");
+
+        let updated = harness
+            .service
+            .get_project(project.id)
+            .await
+            .expect("project after edit");
+        assert_eq!(updated.name, "Forge Prime");
+        assert_eq!(updated.description, "core system");
+        assert_eq!(updated.color, "#123456");
+        assert_eq!(updated.status, ProjectStatus::Paused);
+        assert_eq!(updated.tags, vec!["phase2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn task_edit_command_updates_fields() {
+        let harness = harness().await;
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Ship".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#7b5b41".to_string(),
+            })
+            .await
+            .expect("project");
+        let task = harness
+            .service
+            .create_task(CreateTaskRequest {
+                title: "Patch".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::Low,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+        let task_id = task.id.to_string();
+
+        run(
+            ForgeCli::parse_from([
+                "forge",
+                "task",
+                "edit",
+                task_id.as_str(),
+                "--title",
+                "Patch release",
+                "--inbox",
+                "--priority",
+                "urgent",
+                "--status",
+                "done",
+                "--estimate-minutes",
+                "90",
+                "--tag",
+                "mutation",
+                "--notes",
+                "verified",
+            ]),
+            &harness.api,
+        )
+        .await
+        .expect("run task edit");
+
+        let updated = harness
+            .service
+            .get_task(task.id)
+            .await
+            .expect("task after edit");
+        assert_eq!(updated.title, "Patch release");
+        assert_eq!(updated.project_id, None);
+        assert_eq!(updated.priority, TaskPriority::Urgent);
+        assert_eq!(updated.status, TaskStatus::Done);
+        assert_eq!(updated.estimate_minutes, Some(90));
+        assert_eq!(updated.tags, vec!["mutation".to_string()]);
+        assert_eq!(updated.notes, "verified");
+        assert!(updated.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn event_edit_command_updates_schedule_and_preserves_task_link() {
+        let harness = harness().await;
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Calendar".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#5a4c7b".to_string(),
+            })
+            .await
+            .expect("project");
+        let task = harness
+            .service
+            .create_task(CreateTaskRequest {
+                title: "Research".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::High,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+        let start = Utc::now();
+        let event = harness
+            .service
+            .create_event(CreateEventRequest {
+                title: "Research block".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                linked_task_id: Some(task.id),
+                start_at: start.to_rfc3339(),
+                end_at: (start + chrono::Duration::minutes(60)).to_rfc3339(),
+                timezone: "UTC".to_string(),
+                event_type: EventType::Research,
+                rrule: None,
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+        let event_id = event.id.to_string();
+
+        run(
+            ForgeCli::parse_from([
+                "forge",
+                "event",
+                "edit",
+                event_id.as_str(),
+                "--title",
+                "Research review",
+                "--unassign-project",
+                "--start",
+                "2026-03-10T14:00:00Z",
+                "--end",
+                "2026-03-10T16:00:00Z",
+                "--event-type",
+                "review",
+                "--notes",
+                "rescheduled",
+            ]),
+            &harness.api,
+        )
+        .await
+        .expect("run event edit");
+
+        let updated = harness
+            .service
+            .get_event(event.id)
+            .await
+            .expect("event after edit");
+        assert_eq!(updated.title, "Research review");
+        assert_eq!(updated.project_id, None);
+        assert_eq!(updated.linked_task_id, Some(task.id));
+        assert_eq!(updated.start_at, "2026-03-10T14:00:00+00:00");
+        assert_eq!(updated.end_at, "2026-03-10T16:00:00+00:00");
+        assert_eq!(updated.event_type, EventType::Review);
+        assert_eq!(updated.notes, "rescheduled");
+    }
+
+    #[tokio::test]
+    async fn delete_event_command_preserves_task() {
+        let harness = harness().await;
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Lifecycle".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#46645b".to_string(),
+            })
+            .await
+            .expect("project");
+        let task = harness
+            .service
+            .create_task(CreateTaskRequest {
+                title: "Keep task".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::Medium,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+        let start = Utc::now();
+        let event = harness
+            .service
+            .create_event(CreateEventRequest {
+                title: "Only block".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                linked_task_id: Some(task.id),
+                start_at: start.to_rfc3339(),
+                end_at: (start + chrono::Duration::minutes(45)).to_rfc3339(),
+                timezone: "UTC".to_string(),
+                event_type: EventType::WorkBlock,
+                rrule: None,
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+        let event_id = event.id.to_string();
+
+        run(
+            ForgeCli::parse_from(["forge", "event", "delete", event_id.as_str(), "--yes"]),
+            &harness.api,
+        )
+        .await
+        .expect("run event delete");
+
+        let refreshed = harness
+            .service
+            .get_task(task.id)
+            .await
+            .expect("task after delete");
+        assert_eq!(refreshed.status, TaskStatus::Todo);
+        assert_eq!(refreshed.scheduled_start, None);
+        assert_eq!(refreshed.scheduled_end, None);
+        assert!(
+            harness.service.get_event(event.id).await.is_err(),
+            "event should be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_task_command_removes_linked_events() {
+        let harness = harness().await;
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Cascade".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#7a5137".to_string(),
+            })
+            .await
+            .expect("project");
+        let task = harness
+            .service
+            .create_task(CreateTaskRequest {
+                title: "Delete task".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::Medium,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+        harness
+            .service
+            .create_event(CreateEventRequest {
+                title: "Linked block".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                linked_task_id: Some(task.id),
+                start_at: Utc::now().to_rfc3339(),
+                end_at: (Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
+                timezone: "UTC".to_string(),
+                event_type: EventType::Implementation,
+                rrule: None,
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+        let task_id = task.id.to_string();
+
+        run(
+            ForgeCli::parse_from(["forge", "task", "delete", task_id.as_str(), "--yes"]),
+            &harness.api,
+        )
+        .await
+        .expect("run task delete");
+
+        assert!(
+            harness.service.get_task(task.id).await.is_err(),
+            "task should be gone"
+        );
+        let events = harness
+            .service
+            .list_events(EventListQuery {
+                project_id: None,
+                linked_task_id: Some(task.id),
+            })
+            .await
+            .expect("events");
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_project_command_moves_tasks_to_inbox() {
+        let harness = harness().await;
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Archive".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#446274".to_string(),
+            })
+            .await
+            .expect("project");
+        let task = harness
+            .service
+            .create_task(CreateTaskRequest {
+                title: "Keep task".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::Low,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+        let event = harness
+            .service
+            .create_event(CreateEventRequest {
+                title: "Keep block".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                linked_task_id: Some(task.id),
+                start_at: Utc::now().to_rfc3339(),
+                end_at: (Utc::now() + chrono::Duration::minutes(30)).to_rfc3339(),
+                timezone: "UTC".to_string(),
+                event_type: EventType::Review,
+                rrule: None,
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+        let project_name = project.name.clone();
+
+        run(
+            ForgeCli::parse_from(["forge", "project", "delete", project_name.as_str(), "--yes"]),
+            &harness.api,
+        )
+        .await
+        .expect("run project delete");
+
+        let refreshed_task = harness
+            .service
+            .get_task(task.id)
+            .await
+            .expect("task after delete");
+        let refreshed_event = harness
+            .service
+            .get_event(event.id)
+            .await
+            .expect("event after delete");
+        assert_eq!(refreshed_task.project_id, None);
+        assert_eq!(refreshed_event.project_id, None);
     }
 }

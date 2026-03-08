@@ -1,5 +1,5 @@
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 pub type ForgeResult<T> = Result<T, ValidationError>;
@@ -196,10 +196,15 @@ pub struct CreateProjectRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateProjectRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ProjectStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
 
@@ -227,17 +232,49 @@ pub struct CreateTaskRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateTaskRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub project_id: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<TaskStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<TaskPriority>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub due_at: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub scheduled_start: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub scheduled_end: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub estimate_minutes: Option<Option<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceKind>,
 }
 
@@ -274,17 +311,48 @@ pub struct CreateEventRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateEventRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub project_id: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub linked_task_id: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub event_type: Option<EventType>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rrule: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub recurrence_exceptions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+fn deserialize_patch_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

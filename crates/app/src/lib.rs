@@ -927,4 +927,137 @@ mod tests {
         assert_eq!(refreshed_task.project_id, None);
         assert_eq!(refreshed_event.project_id, None);
     }
+
+    #[tokio::test]
+    async fn updating_task_fields_and_status_sets_completion_metadata() {
+        let service = service().await;
+        let project = service
+            .create_project(CreateProjectRequest {
+                name: "Mutation".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec!["active".to_string()],
+                color: "#3d6b80".to_string(),
+            })
+            .await
+            .expect("project");
+
+        let task = service
+            .create_task(CreateTaskRequest {
+                title: "Patch task".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::Low,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+
+        let updated = service
+            .update_task(
+                task.id,
+                UpdateTaskRequest {
+                    title: Some("Patch task deeply".to_string()),
+                    description: Some("updated".to_string()),
+                    project_id: Some(None),
+                    status: Some(TaskStatus::Done),
+                    priority: Some(TaskPriority::Urgent),
+                    due_at: Some(Some(Utc::now().to_rfc3339())),
+                    scheduled_start: None,
+                    scheduled_end: None,
+                    estimate_minutes: Some(Some(45)),
+                    tags: Some(vec!["cli".to_string(), "mutation".to_string()]),
+                    notes: Some("ship it".to_string()),
+                    source: Some(SourceKind::Cli),
+                },
+            )
+            .await
+            .expect("updated task");
+
+        assert_eq!(updated.title, "Patch task deeply");
+        assert_eq!(updated.description, "updated");
+        assert_eq!(updated.project_id, None);
+        assert_eq!(updated.status, TaskStatus::Done);
+        assert_eq!(updated.priority, TaskPriority::Urgent);
+        assert_eq!(updated.estimate_minutes, Some(45));
+        assert_eq!(updated.tags, vec!["cli".to_string(), "mutation".to_string()]);
+        assert_eq!(updated.notes, "ship it");
+        assert_eq!(updated.source, SourceKind::Cli);
+        assert!(updated.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn deleting_task_removes_linked_events() {
+        let service = service().await;
+        let project = service
+            .create_project(CreateProjectRequest {
+                name: "Cascade".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#2a5e47".to_string(),
+            })
+            .await
+            .expect("project");
+
+        let task = service
+            .create_task(CreateTaskRequest {
+                title: "Delete me".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::Medium,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+
+        let start = Utc::now();
+        let event = service
+            .create_event(CreateEventRequest {
+                title: "Linked block".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                linked_task_id: Some(task.id),
+                start_at: start.to_rfc3339(),
+                end_at: (start + Duration::minutes(30)).to_rfc3339(),
+                timezone: "UTC".to_string(),
+                event_type: EventType::Implementation,
+                rrule: None,
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+
+        service.delete_task(task.id).await.expect("delete task");
+
+        let tasks = service
+            .list_tasks(TaskListQuery::default())
+            .await
+            .expect("tasks");
+        let events = service
+            .list_events(EventListQuery {
+                project_id: None,
+                linked_task_id: Some(task.id),
+            })
+            .await
+            .expect("events");
+
+        assert!(!tasks.iter().any(|item| item.id == task.id));
+        assert!(events.is_empty(), "linked event {} should be deleted", event.id);
+    }
 }
