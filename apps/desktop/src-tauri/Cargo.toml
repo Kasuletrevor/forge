@@ -1,0 +1,17 @@
+[package]
+name = "forge-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+dirs.workspace = true
+domain = { path = "../../../crates/domain" }
+reqwest.workspace = true
+tauri.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[build-dependencies]
+tauri-build.workspace = true
