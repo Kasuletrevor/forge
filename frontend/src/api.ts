@@ -6,6 +6,7 @@ import type {
   CreateTaskRequest,
   EventRecord,
   FocusState,
+  HealthResponse,
   Project,
   ProjectSummary,
   SetFocusRequest,
@@ -20,12 +21,12 @@ import type {
 const DEFAULT_BASE_URL = 'http://127.0.0.1:37241'
 
 export async function resolveApiBaseUrl(): Promise<string> {
-  try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    return await invoke<string>('ensure_daemon')
-  } catch {
+  if (!isTauriEnvironment()) {
     return DEFAULT_BASE_URL
   }
+
+  const { invoke } = await import('@tauri-apps/api/core')
+  return await invoke<string>('ensure_daemon')
 }
 
 async function request<T>(
@@ -73,6 +74,9 @@ function buildQuery(params: Record<string, string | number | boolean | undefined
 }
 
 export const forgeApi = {
+  getHealth(baseUrl: string) {
+    return request<HealthResponse>(baseUrl, '/health')
+  },
   listProjects(baseUrl: string) {
     return request<ProjectSummary[]>(baseUrl, '/projects')
   },
@@ -174,4 +178,8 @@ export const forgeApi = {
   getToday(baseUrl: string) {
     return request<TodaySummary>(baseUrl, '/today')
   },
+}
+
+function isTauriEnvironment() {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 }

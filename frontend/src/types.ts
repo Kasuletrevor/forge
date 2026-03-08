@@ -104,6 +104,22 @@ export interface TodaySummary {
   upcoming_work: CalendarOccurrence[]
 }
 
+export interface ForgePaths {
+  root: string
+  database: string
+  config: string
+  logs: string
+  daemon_log: string
+}
+
+export interface HealthResponse {
+  status: string
+  api_base_url: string
+  paths: ForgePaths
+  started_at: string
+  first_run: boolean
+}
+
 export interface TaskListQuery {
   project_id?: number
   inbox_only?: boolean

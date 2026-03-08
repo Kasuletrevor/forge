@@ -69,6 +69,7 @@ import type {
   CreateTaskRequest,
   EventRecord,
   EventType,
+  HealthResponse,
   Project,
   ProjectStatus,
   Task,
@@ -196,6 +197,7 @@ export default function App() {
   const { toast } = useToast()
   const [screen, setScreen] = useState<Screen>('today')
   const [apiBaseUrl, setApiBaseUrl] = useState('http://127.0.0.1:37241')
+  const [startupError, setStartupError] = useState<string | null>(null)
   const [taskSearch, setTaskSearch] = useState('')
   const deferredTaskSearch = useDeferredValue(taskSearch)
   const [projectFilter, setProjectFilter] = useState<number | 'all' | 'inbox'>('all')
@@ -263,9 +265,14 @@ export default function App() {
   })
 
   useEffect(() => {
-    resolveApiBaseUrl().then(setApiBaseUrl).catch(() => {
-      setApiBaseUrl('http://127.0.0.1:37241')
-    })
+    resolveApiBaseUrl()
+      .then((baseUrl) => {
+        setApiBaseUrl(baseUrl)
+        setStartupError(null)
+      })
+      .catch((error) => {
+        setStartupError(error instanceof Error ? error.message : String(error))
+      })
   }, [])
 
   const projectsQuery = useQuery({
@@ -299,6 +306,12 @@ export default function App() {
     queryFn: () => forgeApi.getToday(apiBaseUrl),
   })
 
+  const healthQuery = useQuery({
+    queryKey: ['health', apiBaseUrl],
+    queryFn: () => forgeApi.getHealth(apiBaseUrl),
+    enabled: Boolean(apiBaseUrl) && !startupError,
+  })
+
   const calendarQuery = useQuery({
     queryKey: ['calendar', apiBaseUrl, calendarRange.start, calendarRange.end],
     queryFn: () => forgeApi.calendarRange(apiBaseUrl, calendarRange),
@@ -309,6 +322,7 @@ export default function App() {
   const rawEvents = eventsQuery.data ?? []
   const calendarEvents = calendarQuery.data ?? []
   const today = todayQuery.data
+  const runtimeHealth: HealthResponse | null = healthQuery.data ?? null
   const projectMap = useMemo(
     () => new Map(projectSummaries.map((summary) => [summary.project.id, summary.project])),
     [projectSummaries],
@@ -1026,7 +1040,7 @@ export default function App() {
             <Stat label="Projects" value={String(projectSummaries.length)} />
             <Stat label="Tasks" value={String(tasks.length)} />
             <Stat label="Events" value={String(rawEvents.length)} />
-            <Stat label="API" value={todayQuery.isError ? 'down' : 'ready'} />
+            <Stat label="API" value={startupError || todayQuery.isError ? 'down' : 'ready'} />
           </div>
         </aside>
 
@@ -1057,7 +1071,12 @@ export default function App() {
               <span className="rounded-full border border-white/10 px-3 py-1">Delete confirm</span>
             </div>
           </header>
-          {loading ? (
+          {startupError ? (
+            <div className="mt-6 rounded-3xl border border-[#c58f80] bg-[#f7e4dc] px-5 py-4 text-sm text-[#6d2a1f]">
+              <div className="font-medium">Forge could not start the local daemon.</div>
+              <div className="mt-2 whitespace-pre-wrap">{startupError}</div>
+            </div>
+          ) : loading ? (
             <div className="mt-6 flex items-center gap-3 rounded-3xl border border-forge-steel/30 bg-white/80 px-5 py-4">
               <LoaderCircle className="size-4 animate-spin text-forge-ember" />
               <span className="text-sm">Loading Forge state...</span>
@@ -1441,11 +1460,15 @@ export default function App() {
                   <Section title="Local API" eyebrow="Runtime">
                     <Setting label="Base URL" value={apiBaseUrl} />
                     <Setting label="Mode" value="Loopback-only, local-first" />
+                    <Setting label="Status" value={runtimeHealth?.status ?? 'unknown'} />
+                    <Setting label="Started" value={runtimeHealth ? fmt(runtimeHealth.started_at) : 'Unavailable'} />
+                    <Setting label="First run" value={runtimeHealth ? (runtimeHealth.first_run ? 'yes' : 'no') : 'unknown'} />
                   </Section>
                   <Section title="Paths" eyebrow="Storage">
-                    <Setting label="Database" value="~/.forge/forge.db" />
-                    <Setting label="Config" value="~/.forge/config.toml" />
-                    <Setting label="Logs" value="~/.forge/logs/" />
+                    <Setting label="Database" value={runtimeHealth?.paths.database ?? '~/.forge/forge.db'} />
+                    <Setting label="Config" value={runtimeHealth?.paths.config ?? '~/.forge/config.toml'} />
+                    <Setting label="Logs" value={runtimeHealth?.paths.logs ?? '~/.forge/logs/'} />
+                    <Setting label="Daemon log" value={runtimeHealth?.paths.daemon_log ?? '~/.forge/logs/forged.log'} />
                   </Section>
                   <Section title="Defaults" eyebrow="Environment">
                     <Setting label="Timezone" value={eventForm.timezone} />
