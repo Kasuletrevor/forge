@@ -1,0 +1,351 @@
+use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+pub type ForgeResult<T> = Result<T, ValidationError>;
+
+pub const DEFAULT_API_HOST: &str = "127.0.0.1";
+pub const DEFAULT_API_PORT: u16 = 37241;
+
+#[derive(Debug, Error, Clone, Serialize, Deserialize)]
+#[error("{message}")]
+pub struct ValidationError {
+    pub message: String,
+}
+
+impl ValidationError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatus {
+    #[default]
+    Active,
+    Paused,
+    Archived,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Inbox,
+    #[default]
+    Todo,
+    Scheduled,
+    InProgress,
+    Blocked,
+    Done,
+    Canceled,
+}
+
+impl TaskStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Canceled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskPriority {
+    Low,
+    #[default]
+    Medium,
+    High,
+    Urgent,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    Meeting,
+    WorkBlock,
+    Research,
+    #[default]
+    Implementation,
+    Admin,
+    Review,
+    Personal,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    #[default]
+    Ui,
+    Cli,
+    Api,
+    Agent,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: i64,
+    pub name: String,
+    pub slug: String,
+    pub description: String,
+    pub status: ProjectStatus,
+    pub tags: Vec<String>,
+    pub color: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    pub project: Project,
+    pub open_task_count: i64,
+    pub upcoming_event_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub project_id: Option<i64>,
+    pub status: TaskStatus,
+    pub priority: TaskPriority,
+    pub due_at: Option<String>,
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    pub estimate_minutes: Option<i32>,
+    pub tags: Vec<String>,
+    pub notes: String,
+    pub source: SourceKind,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub project_id: Option<i64>,
+    pub linked_task_id: Option<i64>,
+    pub start_at: String,
+    pub end_at: String,
+    pub timezone: String,
+    pub event_type: EventType,
+    pub rrule: Option<String>,
+    pub recurrence_exceptions: Vec<String>,
+    pub notes: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FocusState {
+    pub id: i64,
+    pub project_id: i64,
+    pub task_id: Option<i64>,
+    pub started_at: String,
+    pub source: SourceKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarOccurrence {
+    pub event_id: i64,
+    pub title: String,
+    pub description: String,
+    pub project_id: Option<i64>,
+    pub linked_task_id: Option<i64>,
+    pub occurrence_start: String,
+    pub occurrence_end: String,
+    pub timezone: String,
+    pub event_type: EventType,
+    pub is_recurring: bool,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodaySummary {
+    pub date: String,
+    pub focus: Option<FocusState>,
+    pub today_tasks: Vec<Task>,
+    pub overdue_tasks: Vec<Task>,
+    pub today_events: Vec<CalendarOccurrence>,
+    pub upcoming_work: Vec<CalendarOccurrence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthResponse {
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub status: ProjectStatus,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default = "default_project_color")]
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateProjectRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<ProjectStatus>,
+    pub tags: Option<Vec<String>>,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTaskRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub project_id: Option<i64>,
+    #[serde(default)]
+    pub status: TaskStatus,
+    #[serde(default)]
+    pub priority: TaskPriority,
+    pub due_at: Option<String>,
+    pub scheduled_start: Option<String>,
+    pub scheduled_end: Option<String>,
+    pub estimate_minutes: Option<i32>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub source: SourceKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateTaskRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub project_id: Option<Option<i64>>,
+    pub status: Option<TaskStatus>,
+    pub priority: Option<TaskPriority>,
+    pub due_at: Option<Option<String>>,
+    pub scheduled_start: Option<Option<String>>,
+    pub scheduled_end: Option<Option<String>>,
+    pub estimate_minutes: Option<Option<i32>>,
+    pub tags: Option<Vec<String>>,
+    pub notes: Option<String>,
+    pub source: Option<SourceKind>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TaskListQuery {
+    pub project_id: Option<i64>,
+    pub inbox_only: Option<bool>,
+    pub status: Option<TaskStatus>,
+    pub priority: Option<TaskPriority>,
+    pub due_today: Option<bool>,
+    pub overdue: Option<bool>,
+    pub scheduled: Option<bool>,
+    pub search: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEventRequest {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    pub project_id: Option<i64>,
+    pub linked_task_id: Option<i64>,
+    pub start_at: String,
+    pub end_at: String,
+    pub timezone: String,
+    #[serde(default)]
+    pub event_type: EventType,
+    pub rrule: Option<String>,
+    #[serde(default)]
+    pub recurrence_exceptions: Vec<String>,
+    #[serde(default)]
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateEventRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub project_id: Option<Option<i64>>,
+    pub linked_task_id: Option<Option<i64>>,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+    pub timezone: Option<String>,
+    pub event_type: Option<EventType>,
+    pub rrule: Option<Option<String>>,
+    pub recurrence_exceptions: Option<Vec<String>>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EventListQuery {
+    pub project_id: Option<i64>,
+    pub linked_task_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarRangeQuery {
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetFocusRequest {
+    pub project_id: i64,
+    pub task_id: Option<i64>,
+    #[serde(default)]
+    pub source: SourceKind,
+}
+
+pub fn default_project_color() -> String {
+    "#4f6a77".to_string()
+}
+
+pub fn now_timestamp() -> String {
+    Utc::now().to_rfc3339()
+}
+
+pub fn parse_rfc3339(value: &str) -> ForgeResult<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|_| ValidationError::new(format!("invalid RFC3339 timestamp: {value}")))
+}
+
+pub fn parse_date(value: &str) -> ForgeResult<NaiveDate> {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| ValidationError::new(format!("invalid date: {value}")))
+}
+
+pub fn slugify(input: &str) -> String {
+    let mut slug = String::with_capacity(input.len());
+    let mut last_dash = false;
+    for ch in input.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+pub fn require_non_empty(value: &str, field: &str) -> ForgeResult<()> {
+    if value.trim().is_empty() {
+        Err(ValidationError::new(format!("{field} must not be empty")))
+    } else {
+        Ok(())
+    }
+}

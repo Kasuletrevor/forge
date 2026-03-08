@@ -1,0 +1,18 @@
+[package]
+name = "forged"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+api = { path = "../../crates/api" }
+app = { path = "../../crates/app" }
+axum.workspace = true
+domain = { path = "../../crates/domain" }
+dirs.workspace = true
+persistence-sqlite = { path = "../../crates/persistence-sqlite" }
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
