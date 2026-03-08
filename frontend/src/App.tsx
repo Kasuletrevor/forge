@@ -55,6 +55,7 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
 import { useToast } from './components/ui/use-toast'
+import { isTypingTarget, screenFromShortcut, type ShortcutScreen } from './lib/keyboard'
 import { invalidateForgeQueries } from './lib/query'
 import type {
   CreateEventRequest,
@@ -73,7 +74,7 @@ import type {
   UpdateTaskRequest,
 } from './types'
 
-type Screen = 'today' | 'projects' | 'tasks' | 'calendar' | 'settings'
+type Screen = ShortcutScreen
 
 interface ProjectEditorState {
   id: number
@@ -197,6 +198,13 @@ export default function App() {
     end: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString(),
   })
   const externalTasksRef = useRef<HTMLDivElement | null>(null)
+  const screenButtonRefs = useRef<Record<Screen, HTMLButtonElement | null>>({
+    today: null,
+    projects: null,
+    tasks: null,
+    calendar: null,
+    settings: null,
+  })
 
   const [projectForm, setProjectForm] = useState<CreateProjectRequest>({
     name: '',
@@ -325,6 +333,12 @@ export default function App() {
 
   const invalidate = () => invalidateForgeQueries(queryClient)
 
+  function restoreShellFocus() {
+    window.setTimeout(() => {
+      screenButtonRefs.current[screen]?.focus()
+    }, 0)
+  }
+
   function notifyError(title: string, error: unknown) {
     toast({
       title,
@@ -347,6 +361,7 @@ export default function App() {
       forgeApi.updateProject(apiBaseUrl, id, payload),
     onSuccess: async () => {
       setProjectEditor(null)
+      restoreShellFocus()
       await invalidate()
     },
     onError: (error) => notifyError('Failed to update project', error),
@@ -357,6 +372,7 @@ export default function App() {
     onSuccess: async () => {
       setScreen('projects')
       setProjectEditor(null)
+      restoreShellFocus()
       await invalidate()
     },
     onError: (error) => notifyError('Failed to delete project', error),
@@ -375,6 +391,7 @@ export default function App() {
       forgeApi.updateTask(apiBaseUrl, id, payload),
     onSuccess: async () => {
       setTaskEditor(null)
+      restoreShellFocus()
       await invalidate()
     },
     onError: (error) => notifyError('Failed to update task', error),
@@ -385,6 +402,7 @@ export default function App() {
     onSuccess: async () => {
       setTaskEditor(null)
       setInlineTaskEdit({ id: null, title: '' })
+      restoreShellFocus()
       await invalidate()
     },
     onError: (error) => notifyError('Failed to delete task', error),
@@ -413,6 +431,7 @@ export default function App() {
       forgeApi.updateEvent(apiBaseUrl, id, payload),
     onSuccess: async () => {
       setEventEditor(null)
+      restoreShellFocus()
       await invalidate()
     },
     onError: (error) => notifyError('Failed to update event', error),
@@ -422,6 +441,7 @@ export default function App() {
     mutationFn: (id: number) => forgeApi.deleteEvent(apiBaseUrl, id),
     onSuccess: async () => {
       setEventEditor(null)
+      restoreShellFocus()
       await invalidate()
     },
     onError: (error) => notifyError('Failed to delete event', error),
@@ -592,6 +612,63 @@ export default function App() {
     setInlineProjectEdit({ id: null, name: '' })
   }
 
+  function saveProjectEditor() {
+    if (!projectEditor) {
+      return
+    }
+    updateProject.mutate({
+      id: projectEditor.id,
+      payload: {
+        name: projectEditor.name,
+        description: projectEditor.description,
+        status: projectEditor.status,
+        tags: parseTags(projectEditor.tags),
+        color: projectEditor.color,
+      },
+    })
+  }
+
+  function saveTaskEditor() {
+    if (!taskEditor) {
+      return
+    }
+    updateTask.mutate({
+      id: taskEditor.id,
+      payload: {
+        title: taskEditor.title,
+        description: taskEditor.description,
+        project_id: taskEditor.project_id === 'inbox' ? null : Number(taskEditor.project_id),
+        priority: taskEditor.priority,
+        due_at: datetimeLocalToIso(taskEditor.due_at),
+        estimate_minutes: taskEditor.estimate_minutes ? Number(taskEditor.estimate_minutes) : null,
+        tags: parseTags(taskEditor.tags),
+        notes: taskEditor.notes,
+        status: taskEditor.status,
+        source: 'ui',
+      },
+    })
+  }
+
+  function saveEventEditor() {
+    if (!eventEditor) {
+      return
+    }
+    updateEvent.mutate({
+      id: eventEditor.id,
+      payload: {
+        title: eventEditor.title,
+        description: eventEditor.description,
+        project_id: eventEditor.project_id === 'unassigned' ? null : Number(eventEditor.project_id),
+        start_at: datetimeLocalToIso(eventEditor.start_at) ?? undefined,
+        end_at: datetimeLocalToIso(eventEditor.end_at) ?? undefined,
+        timezone: eventEditor.timezone,
+        event_type: eventEditor.event_type,
+        rrule: eventEditor.rrule || null,
+        notes: eventEditor.notes,
+      },
+    })
+  }
+
   function requestDeleteProject(project: Project) {
     setDeleteIntent({
       kind: 'project',
@@ -637,24 +714,59 @@ export default function App() {
       await deleteEvent.mutateAsync(deleteIntent.id)
     }
     setDeleteIntent(null)
+    restoreShellFocus()
   }
 
   useEffect(() => {
-    function handleDeleteShortcut(event: KeyboardEvent) {
-      const target = event.target as HTMLElement | null
-      const typing =
-        target &&
-        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
-      if (event.key !== 'Delete' || typing) {
+    function closeActiveSurface() {
+      if (deleteIntent) {
+        setDeleteIntent(null)
+        restoreShellFocus()
         return
       }
+      if (taskEditor) {
+        setTaskEditor(null)
+        restoreShellFocus()
+        return
+      }
+      if (eventEditor) {
+        setEventEditor(null)
+        restoreShellFocus()
+        return
+      }
+      if (projectEditor) {
+        setProjectEditor(null)
+        restoreShellFocus()
+        return
+      }
+      if (inlineTaskEdit.id !== null) {
+        setInlineTaskEdit({ id: null, title: '' })
+        return
+      }
+      if (inlineProjectEdit.id !== null) {
+        setInlineProjectEdit({ id: null, name: '' })
+      }
+    }
 
+    function requestDeleteForActiveSurface() {
+      if (deleteIntent) {
+        return
+      }
+      if (projectEditor) {
+        const project = projectMap.get(projectEditor.id)
+        if (project) {
+          requestDeleteProject(project)
+        }
+        return
+      }
       if (taskEditor) {
         const task = tasks.find((item) => item.id === taskEditor.id)
         if (task) {
           requestDeleteTask(task)
         }
-      } else if (eventEditor) {
+        return
+      }
+      if (eventEditor) {
         const activeEvent = rawEvents.find((item) => item.id === eventEditor.id)
         if (activeEvent) {
           requestDeleteEvent(activeEvent)
@@ -662,9 +774,76 @@ export default function App() {
       }
     }
 
-    window.addEventListener('keydown', handleDeleteShortcut)
-    return () => window.removeEventListener('keydown', handleDeleteShortcut)
-  }, [eventEditor, rawEvents, taskEditor, tasks])
+    function saveActiveSurface() {
+      if (deleteIntent || inlineTaskEdit.id !== null || inlineProjectEdit.id !== null) {
+        return
+      }
+      if (projectEditor) {
+        saveProjectEditor()
+        return
+      }
+      if (taskEditor) {
+        saveTaskEditor()
+        return
+      }
+      if (eventEditor) {
+        saveEventEditor()
+      }
+    }
+
+    function handleKeyboardShortcuts(event: KeyboardEvent) {
+      const typing = isTypingTarget(event.target)
+      const hasActiveSurface =
+        deleteIntent !== null ||
+        projectEditor !== null ||
+        taskEditor !== null ||
+        eventEditor !== null ||
+        inlineTaskEdit.id !== null ||
+        inlineProjectEdit.id !== null
+
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+        event.preventDefault()
+        saveActiveSurface()
+        return
+      }
+
+      if (event.key === 'Escape' && hasActiveSurface) {
+        event.preventDefault()
+        closeActiveSurface()
+        return
+      }
+
+      if (event.key === 'Delete' && !typing) {
+        event.preventDefault()
+        requestDeleteForActiveSurface()
+        return
+      }
+
+      if (typing || hasActiveSurface || event.metaKey || event.ctrlKey || event.altKey) {
+        return
+      }
+
+      const nextScreen = screenFromShortcut(event.key)
+      if (nextScreen) {
+        event.preventDefault()
+        startTransition(() => setScreen(nextScreen))
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyboardShortcuts)
+    return () => window.removeEventListener('keydown', handleKeyboardShortcuts)
+  }, [
+    deleteIntent,
+    eventEditor,
+    inlineProjectEdit.id,
+    inlineTaskEdit.id,
+    projectEditor,
+    projectMap,
+    rawEvents,
+    screen,
+    taskEditor,
+    tasks,
+  ])
 
   const fullCalendarEvents = calendarEvents.map((event) => {
     const project = event.project_id ? projectMap.get(event.project_id) : undefined
@@ -696,6 +875,9 @@ export default function App() {
             {screens.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
+                ref={(element) => {
+                  screenButtonRefs.current[id] = element
+                }}
                 className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left ${
                   screen === id ? 'bg-[#f2ece0] text-forge-night' : 'bg-white/5 text-white/80'
                 }`}
@@ -735,6 +917,12 @@ export default function App() {
                 }
               />
               <Metric label="API" value={apiBaseUrl} subtle />
+            </div>
+            <div className="mt-5 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.2em] text-[#c7b39c]">
+              <span className="rounded-full border border-white/10 px-3 py-1">1-5 navigate</span>
+              <span className="rounded-full border border-white/10 px-3 py-1">Ctrl/Cmd+Enter save</span>
+              <span className="rounded-full border border-white/10 px-3 py-1">Esc cancel</span>
+              <span className="rounded-full border border-white/10 px-3 py-1">Delete confirm</span>
             </div>
           </header>
           {loading ? (
@@ -855,14 +1043,14 @@ export default function App() {
                   <Section title={projectEditor ? 'Edit Project' : 'Add Project'} eyebrow={projectEditor ? 'Metadata' : 'New'}>
                     {projectEditor ? (
                       <>
-                        <Field label="Name" value={projectEditor.name} onChange={(value) => setProjectEditor({ ...projectEditor, name: value })} />
+                        <Field autoFocus label="Name" value={projectEditor.name} onChange={(value) => setProjectEditor({ ...projectEditor, name: value })} />
                         <Field label="Description" value={projectEditor.description} onChange={(value) => setProjectEditor({ ...projectEditor, description: value })} multiline />
                         <Select label="Status" value={projectEditor.status} onChange={(value) => setProjectEditor({ ...projectEditor, status: value as ProjectStatus })} options={projectStatuses.map((status) => ({ value: status, label: status }))} />
                         <Field label="Tags" value={projectEditor.tags} onChange={(value) => setProjectEditor({ ...projectEditor, tags: value })} placeholder="infra, backend" />
                         <Field label="Color" value={projectEditor.color} onChange={(value) => setProjectEditor({ ...projectEditor, color: value })} type="color" />
                             <div className="mt-4 flex gap-3">
-                              <button className="forge-button" onClick={() => updateProject.mutate({ id: projectEditor.id, payload: { name: projectEditor.name, description: projectEditor.description, status: projectEditor.status, tags: parseTags(projectEditor.tags), color: projectEditor.color } })} type="button">Save project</button>
-                              <button className="forge-button forge-button-muted" onClick={() => setProjectEditor(null)} type="button">Cancel</button>
+                              <button className="forge-button" onClick={saveProjectEditor} type="button">Save project</button>
+                              <button className="forge-button forge-button-muted" onClick={() => { setProjectEditor(null); restoreShellFocus() }} type="button">Cancel</button>
                             </div>
                             <div className="mt-8 rounded-[24px] border border-[#8f3424]/18 bg-[#fff5f2] p-4">
                               <div className="text-[11px] uppercase tracking-[0.24em] text-[#8f3424]">Danger Zone</div>
@@ -1036,6 +1224,12 @@ export default function App() {
                     <Setting label="Timezone" value={eventForm.timezone} />
                     <Setting label="Calendar span" value={`${calendarEvents.length} loaded events`} />
                   </Section>
+                  <Section title="Keyboard" eyebrow="Workflow">
+                    <Setting label="1-5" value="Navigate Today, Projects, Tasks, Calendar, Settings" />
+                    <Setting label="Ctrl/Cmd+Enter" value="Save the active project, task, or event editor" />
+                    <Setting label="Escape" value="Cancel inline edits or close the active dialog" />
+                    <Setting label="Delete" value="Open delete confirmation for the active editor" />
+                  </Section>
                 </div>
               )}
             </div>
@@ -1043,7 +1237,7 @@ export default function App() {
         </main>
       </div>
 
-      <Dialog open={taskEditor !== null} onOpenChange={(open) => !open && setTaskEditor(null)}>
+      <Dialog open={taskEditor !== null} onOpenChange={(open) => { if (!open) { setTaskEditor(null); restoreShellFocus() } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Task</DialogTitle>
@@ -1053,7 +1247,7 @@ export default function App() {
           </DialogHeader>
           {taskEditor ? (
             <>
-            <Field label="Title" value={taskEditor.title} onChange={(value) => setTaskEditor({ ...taskEditor, title: value })} />
+            <Field autoFocus label="Title" value={taskEditor.title} onChange={(value) => setTaskEditor({ ...taskEditor, title: value })} />
             <Field label="Description" value={taskEditor.description} onChange={(value) => setTaskEditor({ ...taskEditor, description: value })} multiline />
             <Select label="Project" value={taskEditor.project_id} onChange={(value) => setTaskEditor({ ...taskEditor, project_id: value })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
             <Select label="Status" value={taskEditor.status} onChange={(value) => setTaskEditor({ ...taskEditor, status: value as TaskStatus })} options={taskStatuses.filter((value) => value !== 'all').map((status) => ({ value: status, label: status }))} />
@@ -1063,8 +1257,8 @@ export default function App() {
             <Field label="Tags" value={taskEditor.tags} onChange={(value) => setTaskEditor({ ...taskEditor, tags: value })} placeholder="ops, infra" />
             <Field label="Notes" value={taskEditor.notes} onChange={(value) => setTaskEditor({ ...taskEditor, notes: value })} multiline />
             <div className="mt-4 flex gap-3">
-              <button className="forge-button" onClick={() => updateTask.mutate({ id: taskEditor.id, payload: { title: taskEditor.title, description: taskEditor.description, project_id: taskEditor.project_id === 'inbox' ? null : Number(taskEditor.project_id), priority: taskEditor.priority, due_at: datetimeLocalToIso(taskEditor.due_at), estimate_minutes: taskEditor.estimate_minutes ? Number(taskEditor.estimate_minutes) : null, tags: parseTags(taskEditor.tags), notes: taskEditor.notes, status: taskEditor.status, source: 'ui' } })} type="button">Save task</button>
-              <button className="forge-button forge-button-muted" onClick={() => setTaskEditor(null)} type="button">Cancel</button>
+              <button className="forge-button" onClick={saveTaskEditor} type="button">Save task</button>
+              <button className="forge-button forge-button-muted" onClick={() => { setTaskEditor(null); restoreShellFocus() }} type="button">Cancel</button>
               <button className="forge-button forge-button-danger ml-auto" onClick={() => {
                 const task = tasks.find((item) => item.id === taskEditor.id)
                 if (task) {
@@ -1077,7 +1271,7 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={eventEditor !== null} onOpenChange={(open) => !open && setEventEditor(null)}>
+      <Dialog open={eventEditor !== null} onOpenChange={(open) => { if (!open) { setEventEditor(null); restoreShellFocus() } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit Event</DialogTitle>
@@ -1087,7 +1281,7 @@ export default function App() {
           </DialogHeader>
           {eventEditor ? (
             <>
-            <Field label="Title" value={eventEditor.title} onChange={(value) => setEventEditor({ ...eventEditor, title: value })} />
+            <Field autoFocus label="Title" value={eventEditor.title} onChange={(value) => setEventEditor({ ...eventEditor, title: value })} />
             <Field label="Description" value={eventEditor.description} onChange={(value) => setEventEditor({ ...eventEditor, description: value })} multiline />
             <Select label="Project" value={eventEditor.project_id} onChange={(value) => setEventEditor({ ...eventEditor, project_id: value })} options={[{ value: 'unassigned', label: 'Unassigned' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
             <Field label="Start" value={eventEditor.start_at} onChange={(value) => setEventEditor({ ...eventEditor, start_at: value })} type="datetime-local" />
@@ -1097,8 +1291,8 @@ export default function App() {
             <Field label="RRULE" value={eventEditor.rrule} onChange={(value) => setEventEditor({ ...eventEditor, rrule: value })} placeholder="Leave empty for one-off" />
             <Field label="Notes" value={eventEditor.notes} onChange={(value) => setEventEditor({ ...eventEditor, notes: value })} multiline />
             <div className="mt-4 flex gap-3">
-              <button className="forge-button" onClick={() => updateEvent.mutate({ id: eventEditor.id, payload: { title: eventEditor.title, description: eventEditor.description, project_id: eventEditor.project_id === 'unassigned' ? null : Number(eventEditor.project_id), start_at: datetimeLocalToIso(eventEditor.start_at) ?? undefined, end_at: datetimeLocalToIso(eventEditor.end_at) ?? undefined, timezone: eventEditor.timezone, event_type: eventEditor.event_type, rrule: eventEditor.rrule || null, notes: eventEditor.notes } })} type="button">Save event</button>
-              <button className="forge-button forge-button-muted" onClick={() => setEventEditor(null)} type="button">Cancel</button>
+              <button className="forge-button" onClick={saveEventEditor} type="button">Save event</button>
+              <button className="forge-button forge-button-muted" onClick={() => { setEventEditor(null); restoreShellFocus() }} type="button">Cancel</button>
               <button
                 className="forge-button forge-button-danger ml-auto"
                 onClick={() => {
@@ -1117,7 +1311,7 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
-      <AlertDialog open={deleteIntent !== null} onOpenChange={(open) => !open && setDeleteIntent(null)}>
+      <AlertDialog open={deleteIntent !== null} onOpenChange={(open) => { if (!open) { setDeleteIntent(null); restoreShellFocus() } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
@@ -1251,6 +1445,7 @@ function Field({
   type = 'text',
   multiline = false,
   placeholder,
+  autoFocus = false,
 }: {
   label: string
   value: string
@@ -1258,14 +1453,15 @@ function Field({
   type?: string
   multiline?: boolean
   placeholder?: string
+  autoFocus?: boolean
 }) {
   return (
     <label className="block space-y-2 text-sm font-medium text-forge-night/80">
       <span>{label}</span>
       {multiline ? (
-        <textarea className="forge-input min-h-28 resize-none" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+        <textarea autoFocus={autoFocus} className="forge-input min-h-28 resize-none" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
       ) : (
-        <input className="forge-input" type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+        <input autoFocus={autoFocus} className="forge-input" type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
       )}
     </label>
   )
