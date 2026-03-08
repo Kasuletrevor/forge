@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use chrono_tz::Tz as ChronoTz;
 use domain::{
     CalendarOccurrence, CalendarRangeQuery, CreateEventRequest, CreateProjectRequest,
     CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult, HealthResponse,
@@ -268,7 +269,11 @@ impl ForgeService {
     }
 
     #[instrument(skip(self, input))]
-    pub async fn create_event(&self, input: CreateEventRequest) -> AppResult<Event> {
+    pub async fn create_event(&self, mut input: CreateEventRequest) -> AppResult<Event> {
+        input.timezone = input.timezone.trim().to_string();
+        if let Some(rule) = input.rrule.as_mut() {
+            *rule = rule.trim().to_string();
+        }
         require_non_empty(&input.title, "event.title")?;
         validate_timestamp_pair(Some(&input.start_at), Some(&input.end_at))?;
         validate_recurrence(&input)?;
@@ -291,7 +296,13 @@ impl ForgeService {
     }
 
     #[instrument(skip(self, input))]
-    pub async fn update_event(&self, id: i64, input: UpdateEventRequest) -> AppResult<Event> {
+    pub async fn update_event(&self, id: i64, mut input: UpdateEventRequest) -> AppResult<Event> {
+        if let Some(timezone) = input.timezone.as_mut() {
+            *timezone = timezone.trim().to_string();
+        }
+        if let Some(Some(rule)) = input.rrule.as_mut() {
+            *rule = rule.trim().to_string();
+        }
         let existing = self.get_event(id).await?;
         if let Some(title) = &input.title {
             require_non_empty(title, "event.title")?;
@@ -305,21 +316,23 @@ impl ForgeService {
             let _ = self.get_task(task_id).await?;
         }
 
-        let updated = self
+        let updated = apply_event_patch(&existing, &input);
+        validate_timestamp_pair(Some(&updated.start_at), Some(&updated.end_at))?;
+        validate_recurrence_event(&updated)?;
+
+        let persisted = self
             .store
             .update_event(id, &input)
             .await
             .map_err(Self::map_store_error)?
             .ok_or(AppError::NotFound("event"))?;
 
-        validate_recurrence_event(&updated)?;
-
-        if existing.linked_task_id != updated.linked_task_id {
+        if existing.linked_task_id != persisted.linked_task_id {
             self.refresh_linked_task_schedule(existing.linked_task_id).await?;
         }
-        self.refresh_linked_task_schedule(updated.linked_task_id).await?;
+        self.refresh_linked_task_schedule(persisted.linked_task_id).await?;
 
-        Ok(updated)
+        Ok(persisted)
     }
 
     #[instrument(skip(self))]
@@ -579,6 +592,8 @@ fn validate_task_state(
 fn validate_recurrence(input: &CreateEventRequest) -> AppResult<()> {
     validate_recurrence_payload(
         &input.start_at,
+        &input.end_at,
+        &input.timezone,
         input.rrule.as_deref(),
         &input.recurrence_exceptions,
     )
@@ -587,6 +602,8 @@ fn validate_recurrence(input: &CreateEventRequest) -> AppResult<()> {
 fn validate_recurrence_event(event: &Event) -> AppResult<()> {
     validate_recurrence_payload(
         &event.start_at,
+        &event.end_at,
+        &event.timezone,
         event.rrule.as_deref(),
         &event.recurrence_exceptions,
     )
@@ -594,15 +611,31 @@ fn validate_recurrence_event(event: &Event) -> AppResult<()> {
 
 fn validate_recurrence_payload(
     start_at: &str,
+    end_at: &str,
+    timezone: &str,
     rrule: Option<&str>,
     recurrence_exceptions: &[String],
 ) -> AppResult<()> {
     parse_rfc3339(start_at)?;
+    parse_rfc3339(end_at)?;
+    let _ = parse_timezone(timezone)?;
+
+    if rrule.is_none() && !recurrence_exceptions.is_empty() {
+        return Err(AppError::Validation(
+            "recurrence exceptions require an RRULE".to_string(),
+        ));
+    }
+
     for exception in recurrence_exceptions {
         parse_rfc3339(exception)?;
     }
     if let Some(rule) = rrule {
-        let _ = build_rrule_set(start_at, rule, recurrence_exceptions)?;
+        if rule.trim().is_empty() {
+            return Err(AppError::Validation(
+                "recurrence rule must not be empty".to_string(),
+            ));
+        }
+        let _ = build_rrule_set(start_at, timezone, rule.trim(), recurrence_exceptions)?;
     }
     Ok(())
 }
@@ -619,7 +652,12 @@ fn expand_event(
     if let Some(rule) = &event.rrule {
         let after = to_rrule_utc(range_start - duration)?;
         let before = to_rrule_utc(range_end)?;
-        let rrule_set = build_rrule_set(&event.start_at, rule, &event.recurrence_exceptions)?;
+        let rrule_set = build_rrule_set(
+            &event.start_at,
+            &event.timezone,
+            rule,
+            &event.recurrence_exceptions,
+        )?;
         let occurrences = rrule_set.after(after).before(before).all(4096).dates;
 
         let mut expanded = Vec::new();
@@ -666,16 +704,24 @@ fn expand_event(
 
 fn build_rrule_set(
     start_at: &str,
+    timezone: &str,
     rule: &str,
     exceptions: &[String],
 ) -> AppResult<RRuleSet> {
     let dt_start = parse_rfc3339(start_at)?;
-    let mut payload = format!("DTSTART:{}\nRRULE:{}", dt_start.format("%Y%m%dT%H%M%SZ"), rule);
+    let timezone = parse_timezone(timezone)?;
+    let local_start = dt_start.with_timezone(&timezone);
+    let mut payload = format!(
+        "DTSTART;TZID={timezone}:{}\nRRULE:{}",
+        local_start.format("%Y%m%dT%H%M%S"),
+        rule
+    );
     for exception in exceptions {
         let exception = parse_rfc3339(exception)?;
+        let local_exception = exception.with_timezone(&timezone);
         payload.push_str(&format!(
-            "\nEXDATE:{}",
-            exception.format("%Y%m%dT%H%M%SZ")
+            "\nEXDATE;TZID={timezone}:{}",
+            local_exception.format("%Y%m%dT%H%M%S")
         ));
     }
     payload
@@ -683,10 +729,59 @@ fn build_rrule_set(
         .map_err(|error| AppError::Validation(format!("invalid recurrence rule: {error}")))
 }
 
+fn parse_timezone(value: &str) -> AppResult<Tz> {
+    value
+        .parse::<ChronoTz>()
+        .map(Into::into)
+        .map_err(|_| {
+            AppError::Validation(format!(
+                "invalid timezone '{value}'; use an IANA timezone like 'UTC' or 'Africa/Kampala'"
+            ))
+        })
+}
+
 fn to_rrule_utc(value: DateTime<Utc>) -> ForgeResult<DateTime<Tz>> {
     DateTime::parse_from_rfc3339(&value.to_rfc3339())
         .map(|value| value.with_timezone(&Tz::UTC))
         .map_err(|_| ValidationError::new("failed to convert UTC timestamp to recurrence timezone"))
+}
+
+fn apply_event_patch(existing: &Event, input: &UpdateEventRequest) -> Event {
+    let mut updated = existing.clone();
+    if let Some(title) = &input.title {
+        updated.title = title.clone();
+    }
+    if let Some(description) = &input.description {
+        updated.description = description.clone();
+    }
+    if let Some(project_id) = input.project_id {
+        updated.project_id = project_id;
+    }
+    if let Some(linked_task_id) = input.linked_task_id {
+        updated.linked_task_id = linked_task_id;
+    }
+    if let Some(start_at) = &input.start_at {
+        updated.start_at = start_at.clone();
+    }
+    if let Some(end_at) = &input.end_at {
+        updated.end_at = end_at.clone();
+    }
+    if let Some(timezone) = &input.timezone {
+        updated.timezone = timezone.clone();
+    }
+    if let Some(event_type) = input.event_type {
+        updated.event_type = event_type;
+    }
+    if let Some(rrule) = &input.rrule {
+        updated.rrule = rrule.clone();
+    }
+    if let Some(recurrence_exceptions) = &input.recurrence_exceptions {
+        updated.recurrence_exceptions = recurrence_exceptions.clone();
+    }
+    if let Some(notes) = &input.notes {
+        updated.notes = notes.clone();
+    }
+    updated
 }
 
 #[cfg(test)]
@@ -1059,5 +1154,175 @@ mod tests {
 
         assert!(!tasks.iter().any(|item| item.id == task.id));
         assert!(events.is_empty(), "linked event {} should be deleted", event.id);
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_event_timezones() {
+        let service = service().await;
+
+        let error = service
+            .create_event(CreateEventRequest {
+                title: "Broken timezone".to_string(),
+                description: String::new(),
+                project_id: None,
+                linked_task_id: None,
+                start_at: "2026-03-10T09:00:00Z".to_string(),
+                end_at: "2026-03-10T10:00:00Z".to_string(),
+                timezone: "Mars/Olympus".to_string(),
+                event_type: EventType::Research,
+                rrule: Some("FREQ=DAILY;COUNT=2".to_string()),
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect_err("invalid timezone should fail");
+
+        assert!(
+            error.to_string().contains("invalid timezone"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_event_patch_does_not_persist() {
+        let service = service().await;
+        let event = service
+            .create_event(CreateEventRequest {
+                title: "Stable series".to_string(),
+                description: String::new(),
+                project_id: None,
+                linked_task_id: None,
+                start_at: "2026-03-10T09:00:00Z".to_string(),
+                end_at: "2026-03-10T10:00:00Z".to_string(),
+                timezone: "UTC".to_string(),
+                event_type: EventType::Research,
+                rrule: Some("FREQ=DAILY;COUNT=2".to_string()),
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+
+        let error = service
+            .update_event(
+                event.id,
+                UpdateEventRequest {
+                    timezone: Some("Mars/Olympus".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("invalid patch should fail");
+
+        assert!(
+            error.to_string().contains("invalid timezone"),
+            "unexpected error: {error}"
+        );
+
+        let reloaded = service.get_event(event.id).await.expect("event after failed patch");
+        assert_eq!(reloaded.timezone, "UTC");
+        assert_eq!(reloaded.rrule.as_deref(), Some("FREQ=DAILY;COUNT=2"));
+    }
+
+    #[tokio::test]
+    async fn recurrence_expansion_respects_event_timezone_across_dst() {
+        let service = service().await;
+        service
+            .create_event(CreateEventRequest {
+                title: "New York standup".to_string(),
+                description: String::new(),
+                project_id: None,
+                linked_task_id: None,
+                start_at: "2026-10-26T09:00:00-04:00".to_string(),
+                end_at: "2026-10-26T10:00:00-04:00".to_string(),
+                timezone: "America/New_York".to_string(),
+                event_type: EventType::Meeting,
+                rrule: Some("FREQ=WEEKLY;COUNT=2".to_string()),
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("recurring event");
+
+        let occurrences = service
+            .calendar_range(CalendarRangeQuery {
+                start: "2026-10-25T00:00:00Z".to_string(),
+                end: "2026-11-03T23:59:59Z".to_string(),
+            })
+            .await
+            .expect("calendar range");
+
+        let starts: Vec<_> = occurrences
+            .iter()
+            .map(|occurrence| occurrence.occurrence_start.as_str())
+            .collect();
+        assert_eq!(starts, vec!["2026-10-26T13:00:00+00:00", "2026-11-02T14:00:00+00:00"]);
+    }
+
+    #[tokio::test]
+    async fn updating_recurring_event_preserves_linked_task_and_refreshes_schedule() {
+        let service = service().await;
+        let project = service
+            .create_project(CreateProjectRequest {
+                name: "Calendar hardening".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#38586f".to_string(),
+            })
+            .await
+            .expect("project");
+
+        let task = service
+            .create_task(CreateTaskRequest {
+                title: "Linked recurrence".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::High,
+                due_at: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                estimate_minutes: None,
+                tags: vec![],
+                notes: String::new(),
+                source: SourceKind::Ui,
+            })
+            .await
+            .expect("task");
+
+        let event = service
+            .create_event(CreateEventRequest {
+                title: "Recurring block".to_string(),
+                description: String::new(),
+                project_id: Some(project.id),
+                linked_task_id: Some(task.id),
+                start_at: "2026-03-09T09:00:00-04:00".to_string(),
+                end_at: "2026-03-09T10:00:00-04:00".to_string(),
+                timezone: "America/New_York".to_string(),
+                event_type: EventType::Implementation,
+                rrule: Some("FREQ=WEEKLY;COUNT=2".to_string()),
+                recurrence_exceptions: vec![],
+                notes: String::new(),
+            })
+            .await
+            .expect("event");
+
+        let updated = service
+            .update_event(
+                event.id,
+                UpdateEventRequest {
+                    start_at: Some("2026-03-09T11:00:00-04:00".to_string()),
+                    end_at: Some("2026-03-09T12:30:00-04:00".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("updated event");
+
+        let refreshed_task = service.get_task(task.id).await.expect("task after event update");
+        assert_eq!(updated.linked_task_id, Some(task.id));
+        assert_eq!(refreshed_task.scheduled_start.as_deref(), Some("2026-03-09T11:00:00-04:00"));
+        assert_eq!(refreshed_task.scheduled_end.as_deref(), Some("2026-03-09T12:30:00-04:00"));
     }
 }
