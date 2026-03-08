@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type DragEvent as ReactDragEvent,
   type ReactNode,
 } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -57,6 +58,7 @@ import {
 import { useToast } from './components/ui/use-toast'
 import { isTypingTarget, screenFromShortcut, type ShortcutScreen } from './lib/keyboard'
 import { invalidateForgeQueries } from './lib/query'
+import { buildTaskLanes } from './lib/task-board'
 import type {
   CreateEventRequest,
   CreateProjectRequest,
@@ -193,6 +195,8 @@ export default function App() {
   const deferredTaskSearch = useDeferredValue(taskSearch)
   const [projectFilter, setProjectFilter] = useState<number | 'all' | 'inbox'>('all')
   const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
+  const [dragTaskId, setDragTaskId] = useState<number | null>(null)
+  const [dragLaneProjectId, setDragLaneProjectId] = useState<number | null | 'inbox'>(null)
   const [calendarRange, setCalendarRange] = useState({
     start: new Date().toISOString(),
     end: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString(),
@@ -315,6 +319,10 @@ export default function App() {
           task.status !== 'canceled',
       ),
     [tasks],
+  )
+  const taskLanes = useMemo(
+    () => buildTaskLanes(tasks.filter((task) => task.status !== 'done' && task.status !== 'canceled'), projectSummaries),
+    [projectSummaries, tasks],
   )
 
   useEffect(() => {
@@ -562,6 +570,49 @@ export default function App() {
       rrule: event.rrule ?? '',
       notes: event.notes,
     })
+  }
+
+  function handleTaskLaneDragStart(
+    event: ReactDragEvent<HTMLDivElement>,
+    taskId: number,
+  ) {
+    setDragTaskId(taskId)
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-forge-task-id', String(taskId))
+  }
+
+  function handleTaskLaneDragEnd() {
+    setDragTaskId(null)
+    setDragLaneProjectId(null)
+  }
+
+  async function moveTaskToLane(
+    event: ReactDragEvent<HTMLDivElement>,
+    projectId: number | null,
+  ) {
+    const payloadTaskId = Number(
+      event.dataTransfer.getData('application/x-forge-task-id') || dragTaskId,
+    )
+    if (!payloadTaskId) {
+      return
+    }
+    const task = tasks.find((item) => item.id === payloadTaskId)
+    if (!task || task.project_id === projectId) {
+      handleTaskLaneDragEnd()
+      return
+    }
+
+    try {
+      await updateTask.mutateAsync({
+        id: task.id,
+        payload: {
+          project_id: projectId,
+          source: 'ui',
+        },
+      })
+    } finally {
+      handleTaskLaneDragEnd()
+    }
   }
 
   function openProjectEditor(project: Project) {
@@ -1084,75 +1135,166 @@ export default function App() {
               )}
 
               {screen === 'tasks' && (
-                <div className="grid gap-5 xl:grid-cols-[1.2fr,0.8fr]">
-                  <Section title="Filter and Execute" eyebrow="Tasks">
-                    <div className="grid gap-3 md:grid-cols-4">
-                      <Field label="Search" value={taskSearch} onChange={setTaskSearch} />
-                      <Select
-                        label="Project"
-                        value={String(projectFilter)}
-                        onChange={(value) => setProjectFilter(value === 'all' || value === 'inbox' ? value : Number(value))}
-                        options={[
-                          { value: 'all', label: 'All projects' },
-                          { value: 'inbox', label: 'Inbox only' },
-                          ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name })),
-                        ]}
-                      />
-                      <Select
-                        label="Status"
-                        value={statusFilter}
-                        onChange={(value) => setStatusFilter(value as TaskStatus | 'all')}
-                        options={taskStatuses.map((status) => ({ value: status, label: status }))}
-                      />
-                      <button className="forge-button self-end" onClick={() => clearDone.mutate()} type="button">Clear done</button>
-                    </div>
-                    <div className="mt-5 space-y-3">
-                      {tasks.length === 0 ? (
-                        <Empty label="No tasks match this filter." />
-                      ) : (
-                        tasks.map((task) => (
-                          <TaskCard
-                            key={task.id}
-                            task={task}
-                            project={task.project_id ? projectMap.get(task.project_id) : undefined}
-                            onComplete={task.status === 'done' ? undefined : () => completeTask.mutate(task.id)}
-                            onEdit={() => openTaskEditor(task)}
-                            onDelete={() => requestDeleteTask(task)}
-                            compact
-                            titleSlot={
-                              inlineTaskEdit.id === task.id ? (
-                                <input
-                                  autoFocus
-                                  className="forge-input mt-3"
-                                  value={inlineTaskEdit.title}
-                                  onBlur={() => void saveInlineTaskTitle(task.id)}
-                                  onChange={(event) => setInlineTaskEdit({ id: task.id, title: event.target.value })}
-                                  onKeyDown={(event) => {
-                                    if (event.key === 'Enter') {
-                                      event.preventDefault()
-                                      void saveInlineTaskTitle(task.id)
-                                    }
-                                    if (event.key === 'Escape') {
-                                      setInlineTaskEdit({ id: null, title: '' })
-                                    }
-                                  }}
-                                />
-                              ) : undefined
-                            }
-                            onInlineEdit={() => setInlineTaskEdit({ id: task.id, title: task.title })}
-                          />
-                        ))
-                      )}
-                    </div>
-                  </Section>
-                  <Section title="Quick Add" eyebrow="Capture">
-                    <Field label="Title" value={taskForm.title} onChange={(value) => setTaskForm({ ...taskForm, title: value })} />
-                    <Field label="Description" value={taskForm.description} onChange={(value) => setTaskForm({ ...taskForm, description: value })} multiline />
-                    <Select label="Project" value={String(taskForm.project_id ?? 'inbox')} onChange={(value) => setTaskForm({ ...taskForm, project_id: value === 'inbox' ? null : Number(value) })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
-                    <Select label="Priority" value={taskForm.priority} onChange={(value) => setTaskForm({ ...taskForm, priority: value as TaskPriority })} options={taskPriorities.map((priority) => ({ value: priority, label: priority }))} />
-                    <Field label="Due" value={isoToDatetimeLocal(taskForm.due_at)} onChange={(value) => setTaskForm({ ...taskForm, due_at: datetimeLocalToIso(value) })} type="datetime-local" />
-                    <button className="forge-button mt-4" onClick={() => createTask.mutate(taskForm)} type="button">Create task</button>
-                  </Section>
+                <div className="grid gap-5 xl:grid-cols-[1.35fr,0.75fr]">
+                  <div className="grid gap-5">
+                    <Section title="Reassign by Drag" eyebrow="Board">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="max-w-2xl text-sm text-forge-night/72">
+                          Drag operational tasks between Inbox and project lanes. The board follows the active task filter, and lane changes only render after the daemon API confirms the mutation.
+                        </p>
+                        <div className="rounded-full border border-forge-steel/20 bg-[#f6f0e6] px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-forge-steel">
+                          Drag to Inbox or project
+                        </div>
+                      </div>
+                      <div className="mt-5 flex gap-4 overflow-x-auto pb-2">
+                        {taskLanes.map((lane) => {
+                          const isActiveDrop =
+                            dragTaskId !== null &&
+                            ((lane.projectId === null && dragLaneProjectId === 'inbox') ||
+                              lane.projectId === dragLaneProjectId)
+
+                          return (
+                            <div
+                              key={lane.id}
+                              data-forge-task-lane={lane.id}
+                              data-forge-project-id={lane.projectId ?? 'inbox'}
+                              className={`min-h-[24rem] min-w-[18rem] flex-1 rounded-[28px] border p-4 transition ${
+                                isActiveDrop
+                                  ? 'border-forge-ember bg-[#fff1e8] shadow-panel'
+                                  : 'border-forge-steel/20 bg-[#f8f4ed]'
+                              }`}
+                              onDragEnter={(event) => {
+                                event.preventDefault()
+                                setDragLaneProjectId(lane.projectId === null ? 'inbox' : lane.projectId)
+                              }}
+                              onDragOver={(event) => {
+                                event.preventDefault()
+                                setDragLaneProjectId(lane.projectId === null ? 'inbox' : lane.projectId)
+                              }}
+                              onDragLeave={(event) => {
+                                if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                                  return
+                                }
+                                setDragLaneProjectId(null)
+                              }}
+                              onDrop={(event) => {
+                                event.preventDefault()
+                                void moveTaskToLane(event, lane.projectId)
+                              }}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <div
+                                    className="h-2.5 w-20 rounded-full"
+                                    style={{ backgroundColor: lane.color }}
+                                  />
+                                  <h3 className="mt-3 font-display text-2xl text-forge-night">{lane.title}</h3>
+                                </div>
+                                <div className="rounded-full bg-white px-3 py-1 text-[11px] uppercase tracking-[0.24em] text-forge-steel">
+                                  {lane.tasks.length} tasks
+                                </div>
+                              </div>
+                              <div className="mt-4 space-y-3">
+                                {lane.tasks.length === 0 ? (
+                                  <Empty label={dragTaskId !== null ? 'Drop a task here.' : 'No active tasks in this lane.'} compact />
+                                ) : (
+                                  lane.tasks.map((task) => (
+                                    <TaskLaneCard
+                                      key={task.id}
+                                      task={task}
+                                      project={task.project_id ? projectMap.get(task.project_id) : undefined}
+                                      dragging={dragTaskId === task.id}
+                                      onDelete={() => requestDeleteTask(task)}
+                                      onDragEnd={handleTaskLaneDragEnd}
+                                      onDragStart={(event) => handleTaskLaneDragStart(event, task.id)}
+                                      onEdit={() => openTaskEditor(task)}
+                                    />
+                                  ))
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </Section>
+
+                    <Section title="Filtered Queue" eyebrow="Tasks">
+                      <div className="grid gap-3 md:grid-cols-4">
+                        <Field label="Search" value={taskSearch} onChange={setTaskSearch} />
+                        <Select
+                          label="Project"
+                          value={String(projectFilter)}
+                          onChange={(value) => setProjectFilter(value === 'all' || value === 'inbox' ? value : Number(value))}
+                          options={[
+                            { value: 'all', label: 'All projects' },
+                            { value: 'inbox', label: 'Inbox only' },
+                            ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name })),
+                          ]}
+                        />
+                        <Select
+                          label="Status"
+                          value={statusFilter}
+                          onChange={(value) => setStatusFilter(value as TaskStatus | 'all')}
+                          options={taskStatuses.map((status) => ({ value: status, label: status }))}
+                        />
+                        <button className="forge-button self-end" onClick={() => clearDone.mutate()} type="button">Clear done</button>
+                      </div>
+                      <div className="mt-5 space-y-3">
+                        {tasks.length === 0 ? (
+                          <Empty label="No tasks match this filter." />
+                        ) : (
+                          tasks.map((task) => (
+                            <TaskCard
+                              key={task.id}
+                              task={task}
+                              project={task.project_id ? projectMap.get(task.project_id) : undefined}
+                              onComplete={task.status === 'done' ? undefined : () => completeTask.mutate(task.id)}
+                              onEdit={() => openTaskEditor(task)}
+                              onDelete={() => requestDeleteTask(task)}
+                              compact
+                              titleSlot={
+                                inlineTaskEdit.id === task.id ? (
+                                  <input
+                                    autoFocus
+                                    className="forge-input mt-3"
+                                    value={inlineTaskEdit.title}
+                                    onBlur={() => void saveInlineTaskTitle(task.id)}
+                                    onChange={(event) => setInlineTaskEdit({ id: task.id, title: event.target.value })}
+                                    onKeyDown={(event) => {
+                                      if (event.key === 'Enter') {
+                                        event.preventDefault()
+                                        void saveInlineTaskTitle(task.id)
+                                      }
+                                      if (event.key === 'Escape') {
+                                        setInlineTaskEdit({ id: null, title: '' })
+                                      }
+                                    }}
+                                  />
+                                ) : undefined
+                              }
+                              onInlineEdit={() => setInlineTaskEdit({ id: task.id, title: task.title })}
+                            />
+                          ))
+                        )}
+                      </div>
+                    </Section>
+                  </div>
+
+                  <div className="grid gap-5">
+                    <Section title="Quick Add" eyebrow="Capture">
+                      <Field label="Title" value={taskForm.title} onChange={(value) => setTaskForm({ ...taskForm, title: value })} />
+                      <Field label="Description" value={taskForm.description} onChange={(value) => setTaskForm({ ...taskForm, description: value })} multiline />
+                      <Select label="Project" value={String(taskForm.project_id ?? 'inbox')} onChange={(value) => setTaskForm({ ...taskForm, project_id: value === 'inbox' ? null : Number(value) })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
+                      <Select label="Priority" value={taskForm.priority} onChange={(value) => setTaskForm({ ...taskForm, priority: value as TaskPriority })} options={taskPriorities.map((priority) => ({ value: priority, label: priority }))} />
+                      <Field label="Due" value={isoToDatetimeLocal(taskForm.due_at)} onChange={(value) => setTaskForm({ ...taskForm, due_at: datetimeLocalToIso(value) })} type="datetime-local" />
+                      <button className="forge-button mt-4" onClick={() => createTask.mutate(taskForm)} type="button">Create task</button>
+                    </Section>
+                    <Section title="Drag Notes" eyebrow="Behavior">
+                      <Setting label="Inbox" value="Dropping into Inbox sets project_id to null" />
+                      <Setting label="Mutations" value="Lane changes patch the daemon API before UI refresh" />
+                      <Setting label="Task data" value="Scheduling, notes, and estimates remain intact during reassignment" />
+                    </Section>
+                  </div>
                 </div>
               )}
 
@@ -1348,6 +1490,79 @@ function Section({ eyebrow, title, children }: { eyebrow: string; title: string;
     </section>
   )
 }
+
+function TaskLaneCard({
+  task,
+  project,
+  dragging,
+  onDragStart,
+  onDragEnd,
+  onEdit,
+  onDelete,
+}: {
+  task: Task
+  project?: Project
+  dragging: boolean
+  onDragStart: (event: ReactDragEvent<HTMLDivElement>) => void
+  onDragEnd: () => void
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  return (
+    <div
+      draggable
+      data-forge-task-card={task.id}
+      className={`cursor-grab rounded-[26px] border px-4 py-4 transition ${
+        dragging
+          ? 'border-forge-ember/40 bg-[#f8d8c4] opacity-60'
+          : 'border-forge-steel/20 bg-white'
+      }`}
+      onDragEnd={onDragEnd}
+      onDragStart={onDragStart}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-forge-paper px-3 py-1 text-[11px] uppercase tracking-[0.25em] text-forge-steel">
+              {task.status.replace('_', ' ')}
+            </span>
+            <span
+              className="rounded-full px-3 py-1 text-[11px] uppercase tracking-[0.22em] text-forge-night"
+              style={{
+                backgroundColor: `${project?.color ?? '#8a7d68'}24`,
+              }}
+            >
+              {task.priority}
+            </span>
+          </div>
+          <div className="mt-3 font-medium text-forge-night">{task.title}</div>
+          <div className="mt-2 text-xs uppercase tracking-[0.18em] text-forge-steel">
+            {task.project_id ? project?.name ?? `Project #${task.project_id}` : 'Inbox'} •{' '}
+            {fmt(task.due_at ?? task.scheduled_start)}
+          </div>
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="icon-button" type="button">
+              <MoreHorizontal className="size-4" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={onEdit}>Edit task</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="text-[#8f3424] focus:bg-[#f6ddd6] focus:text-[#8f3424]"
+              onSelect={onDelete}
+            >
+              Delete task
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+  )
+}
+
 function TaskCard({
   task,
   project,
