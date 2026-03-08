@@ -1,8 +1,9 @@
 use std::{
     env,
+    fs::OpenOptions,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     time::Duration,
 };
 
@@ -11,10 +12,10 @@ use chrono::{Days, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use domain::{
     CalendarOccurrence, CreateEventRequest, CreateProjectRequest, CreateTaskRequest, Event,
-    EventListQuery, FocusState, Project, ProjectStatus, ProjectSummary, SetFocusRequest,
-    SourceKind, Task, TaskListQuery, TaskStatus, TodaySummary, UpdateEventRequest,
-    UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST, DEFAULT_API_PORT,
-    default_project_color, parse_rfc3339,
+    EventListQuery, FocusState, ForgePaths, HealthResponse, Project, ProjectStatus,
+    ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus, TodaySummary,
+    UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
+    DEFAULT_API_PORT, default_project_color, parse_rfc3339,
 };
 use reqwest::Client;
 use serde::Serialize;
@@ -640,24 +641,24 @@ struct ForgeApi {
 
 impl ForgeApi {
     async fn connect() -> Result<Self> {
-        ensure_daemon_running().await?;
-        let base_url = format!("http://{DEFAULT_API_HOST}:{DEFAULT_API_PORT}");
+        let health = ensure_daemon_running().await?;
+        let base_url = health.api_base_url.clone();
         let client = Client::builder().timeout(Duration::from_secs(5)).build()?;
         let api = Self { client, base_url };
         let _ = api.health().await?;
         Ok(api)
     }
 
-    async fn health(&self) -> Result<String> {
-        let payload: serde_json::Value = self
+    async fn health(&self) -> Result<HealthResponse> {
+        self
             .client
             .get(format!("{}/health", self.base_url))
             .send()
             .await?
             .error_for_status()?
             .json()
-            .await?;
-        Ok(payload["status"].as_str().unwrap_or("unknown").to_string())
+            .await
+            .map_err(Into::into)
     }
 
     async fn list_projects(&self, include_archived: bool) -> Result<Vec<ProjectSummary>> {
@@ -839,34 +840,69 @@ impl ForgeApi {
     }
 }
 
-async fn ensure_daemon_running() -> Result<()> {
+async fn ensure_daemon_running() -> Result<HealthResponse> {
     let client = Client::builder().timeout(Duration::from_millis(600)).build()?;
-    let health_url = format!("http://{DEFAULT_API_HOST}:{DEFAULT_API_PORT}/health");
-    if client.get(&health_url).send().await.is_ok() {
-        return Ok(());
+    let paths = ForgePaths::discover().map_err(|error| anyhow!(error.message))?;
+    let health_url = paths.health_url(DEFAULT_API_HOST, DEFAULT_API_PORT);
+    if let Some(health) = fetch_health(&client, &health_url).await {
+        return Ok(health);
     }
 
-    spawn_forged_process()?;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        if client.get(&health_url).send().await.is_ok() {
-            return Ok(());
+    let mut child = spawn_forged_process(&paths).with_context(|| {
+        format!(
+            "failed to start Forge daemon; inspect {} and {}",
+            paths.daemon_log.display(),
+            paths.config.display()
+        )
+    })?;
+    let mut exit_status = None;
+    for _ in 0..32 {
+        if let Some(health) = fetch_health(&client, &health_url).await {
+            return Ok(health);
         }
+        if exit_status.is_none() {
+            exit_status = child.try_wait().context("failed to observe daemon process")?;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    bail!("Forge daemon did not become ready")
+    if let Some(health) = fetch_health(&client, &health_url).await {
+        return Ok(health);
+    }
+
+    bail!(format_startup_failure(&paths, &health_url, exit_status))
 }
 
-fn spawn_forged_process() -> Result<()> {
+async fn fetch_health(client: &Client, health_url: &str) -> Option<HealthResponse> {
+    client
+        .get(health_url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<HealthResponse>()
+        .await
+        .ok()
+}
+
+fn spawn_forged_process(paths: &ForgePaths) -> Result<Child> {
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&paths.daemon_log)
+        .with_context(|| format!("failed to open {}", paths.daemon_log.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .with_context(|| format!("failed to clone {}", paths.daemon_log.display()))?;
     let sibling = sibling_forged_binary();
     if sibling.exists() {
-        Command::new(sibling)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+        return Command::new(sibling)
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
             .stdin(Stdio::null())
             .spawn()
-            .context("failed to start sibling forged binary")?;
-        return Ok(());
+            .context("failed to start sibling forged binary");
     }
 
     let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -877,18 +913,29 @@ fn spawn_forged_process() -> Result<()> {
     Command::new("cargo")
         .args(["run", "-p", "forged"])
         .current_dir(workspace_root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .stdin(Stdio::null())
         .spawn()
-        .context("failed to start forged via cargo run")?;
-    Ok(())
+        .context("failed to start forged via cargo run")
 }
 
 fn sibling_forged_binary() -> PathBuf {
     let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("forge"));
     let binary = if cfg!(windows) { "forged.exe" } else { "forged" };
     exe.with_file_name(binary)
+}
+
+fn format_startup_failure(paths: &ForgePaths, health_url: &str, exit_status: Option<ExitStatus>) -> String {
+    let exit_detail = exit_status
+        .map(|status| format!("daemon process exited early with status {status}; "))
+        .unwrap_or_default();
+    format!(
+        "Forge daemon did not become ready at {health_url}; {exit_detail}inspect logs at {}, config at {}, and database at {}",
+        paths.daemon_log.display(),
+        paths.config.display(),
+        paths.database.display()
+    )
 }
 fn print_today(summary: &TodaySummary) {
     println!("Today {}", summary.date);
@@ -1595,5 +1642,16 @@ mod tests {
             .expect("event after delete");
         assert_eq!(refreshed_task.project_id, None);
         assert_eq!(refreshed_event.project_id, None);
+    }
+
+    #[test]
+    fn startup_failure_message_includes_debug_paths() {
+        let paths = ForgePaths::from_root(PathBuf::from("C:\\forge-test"));
+        let message = format_startup_failure(&paths, "http://127.0.0.1:37241/health", None);
+
+        assert!(message.contains("http://127.0.0.1:37241/health"));
+        assert!(message.contains("forged.log"));
+        assert!(message.contains("config.toml"));
+        assert!(message.contains("forge.db"));
     }
 }
