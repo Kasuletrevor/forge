@@ -56,6 +56,10 @@ import {
   DropdownMenuTrigger,
 } from './components/ui/dropdown-menu'
 import { useToast } from './components/ui/use-toast'
+import {
+  normalizeRRule,
+  validateEventMutationDraft,
+} from './lib/event-validation'
 import { isTypingTarget, screenFromShortcut, type ShortcutScreen } from './lib/keyboard'
 import { invalidateForgeQueries } from './lib/query'
 import { buildTaskLanes } from './lib/task-board'
@@ -105,6 +109,7 @@ interface EventEditorState {
   title: string
   description: string
   project_id: string
+  linked_task_id: number | null
   start_at: string
   end_at: string
   timezone: string
@@ -471,6 +476,22 @@ export default function App() {
     }
     const start = arg.event.start ?? new Date()
     const end = arg.event.end ?? new Date(start.getTime() + 1000 * 60 * 90)
+    const draftError = validateEventMutationDraft({
+      title: task.title,
+      startAt: start.toISOString(),
+      endAt: end.toISOString(),
+      timezone: eventForm.timezone,
+      rrule: null,
+    })
+    if (draftError) {
+      arg.revert()
+      toast({
+        title: 'Failed to schedule task',
+        description: draftError,
+        variant: 'destructive',
+      })
+      return
+    }
     try {
       await createEvent.mutateAsync({
         title: task.title,
@@ -492,16 +513,6 @@ export default function App() {
 
   async function handleEventDrop(arg: EventDropArg) {
     const eventId = Number(arg.event.extendedProps.eventId)
-    const isRecurring = Boolean(arg.event.extendedProps.isRecurring)
-    if (isRecurring) {
-      arg.revert()
-      toast({
-        title: 'Recurring events stay fixed',
-        description: 'Recurring events cannot be rescheduled by drag yet.',
-        variant: 'destructive',
-      })
-      return
-    }
     const original = rawEvents.find((event) => event.id === eventId)
     if (!original || !arg.event.start) {
       arg.revert()
@@ -510,6 +521,22 @@ export default function App() {
     const fallbackDuration =
       new Date(original.end_at).getTime() - new Date(original.start_at).getTime()
     const nextEnd = arg.event.end ?? new Date(arg.event.start.getTime() + fallbackDuration)
+    const draftError = validateEventMutationDraft({
+      title: original.title,
+      startAt: arg.event.start.toISOString(),
+      endAt: nextEnd.toISOString(),
+      timezone: original.timezone,
+      rrule: original.rrule,
+    })
+    if (draftError) {
+      arg.revert()
+      toast({
+        title: 'Failed to reschedule event',
+        description: draftError,
+        variant: 'destructive',
+      })
+      return
+    }
     try {
       await updateEvent.mutateAsync({
         id: eventId,
@@ -525,18 +552,29 @@ export default function App() {
 
   async function handleEventResize(arg: EventResizeDoneArg) {
     const eventId = Number(arg.event.extendedProps.eventId)
-    const isRecurring = Boolean(arg.event.extendedProps.isRecurring)
-    if (isRecurring) {
-      arg.revert()
-      toast({
-        title: 'Recurring events stay fixed',
-        description: 'Recurring events cannot be resized from the calendar yet.',
-        variant: 'destructive',
-      })
-      return
-    }
+    const original = rawEvents.find((event) => event.id === eventId)
     if (!arg.event.start || !arg.event.end) {
       arg.revert()
+      return
+    }
+    if (!original) {
+      arg.revert()
+      return
+    }
+    const draftError = validateEventMutationDraft({
+      title: original.title,
+      startAt: arg.event.start.toISOString(),
+      endAt: arg.event.end.toISOString(),
+      timezone: original.timezone,
+      rrule: original.rrule,
+    })
+    if (draftError) {
+      arg.revert()
+      toast({
+        title: 'Failed to resize event',
+        description: draftError,
+        variant: 'destructive',
+      })
       return
     }
     try {
@@ -563,6 +601,7 @@ export default function App() {
       title: event.title,
       description: event.description,
       project_id: event.project_id === null ? 'unassigned' : String(event.project_id),
+      linked_task_id: event.linked_task_id,
       start_at: isoToDatetimeLocal(event.start_at),
       end_at: isoToDatetimeLocal(event.end_at),
       timezone: event.timezone,
@@ -704,19 +743,61 @@ export default function App() {
     if (!eventEditor) {
       return
     }
+    const payloadStart = datetimeLocalToIso(eventEditor.start_at)
+    const payloadEnd = datetimeLocalToIso(eventEditor.end_at)
+    const payloadRRule = normalizeRRule(eventEditor.rrule)
+    const draftError = validateEventMutationDraft({
+      title: eventEditor.title,
+      startAt: payloadStart,
+      endAt: payloadEnd,
+      timezone: eventEditor.timezone,
+      rrule: eventEditor.rrule,
+    })
+    if (draftError) {
+      toast({
+        title: 'Failed to update event',
+        description: draftError,
+        variant: 'destructive',
+      })
+      return
+    }
     updateEvent.mutate({
       id: eventEditor.id,
       payload: {
-        title: eventEditor.title,
+        title: eventEditor.title.trim(),
         description: eventEditor.description,
         project_id: eventEditor.project_id === 'unassigned' ? null : Number(eventEditor.project_id),
-        start_at: datetimeLocalToIso(eventEditor.start_at) ?? undefined,
-        end_at: datetimeLocalToIso(eventEditor.end_at) ?? undefined,
+        start_at: payloadStart ?? undefined,
+        end_at: payloadEnd ?? undefined,
         timezone: eventEditor.timezone,
         event_type: eventEditor.event_type,
-        rrule: eventEditor.rrule || null,
+        rrule: payloadRRule,
         notes: eventEditor.notes,
       },
+    })
+  }
+
+  function saveEventForm() {
+    const payloadRRule = normalizeRRule(eventForm.rrule)
+    const draftError = validateEventMutationDraft({
+      title: eventForm.title,
+      startAt: eventForm.start_at,
+      endAt: eventForm.end_at,
+      timezone: eventForm.timezone,
+      rrule: eventForm.rrule,
+    })
+    if (draftError) {
+      toast({
+        title: 'Failed to create event',
+        description: draftError,
+        variant: 'destructive',
+      })
+      return
+    }
+    createEvent.mutate({
+      ...eventForm,
+      title: eventForm.title.trim(),
+      rrule: payloadRRule,
     })
   }
 
@@ -1344,9 +1425,13 @@ export default function App() {
                     <Select label="Project" value={eventForm.project_id === null ? 'unassigned' : String(eventForm.project_id)} onChange={(value) => setEventForm({ ...eventForm, project_id: value === 'unassigned' ? null : Number(value) })} options={[{ value: 'unassigned', label: 'Unassigned' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
                     <Field label="Start" value={isoToDatetimeLocal(eventForm.start_at)} onChange={(value) => setEventForm({ ...eventForm, start_at: datetimeLocalToIso(value) ?? eventForm.start_at })} type="datetime-local" />
                     <Field label="End" value={isoToDatetimeLocal(eventForm.end_at)} onChange={(value) => setEventForm({ ...eventForm, end_at: datetimeLocalToIso(value) ?? eventForm.end_at })} type="datetime-local" />
+                    <Field label="Timezone" value={eventForm.timezone} onChange={(value) => setEventForm({ ...eventForm, timezone: value })} placeholder="UTC" />
                     <Select label="Event Type" value={eventForm.event_type} onChange={(value) => setEventForm({ ...eventForm, event_type: value as EventType })} options={eventTypes.map((eventType) => ({ value: eventType, label: eventType }))} />
                     <Field label="RRULE" value={eventForm.rrule ?? ''} onChange={(value) => setEventForm({ ...eventForm, rrule: value || null })} placeholder="FREQ=WEEKLY;BYDAY=MO,WE" />
-                    <button className="forge-button mt-4" onClick={() => createEvent.mutate(eventForm)} type="button">Create event</button>
+                    <p className="mt-2 text-xs uppercase tracking-[0.18em] text-forge-steel">
+                      Examples: FREQ=DAILY;COUNT=5 or FREQ=WEEKLY;BYDAY=MO,WE
+                    </p>
+                    <button className="forge-button mt-4" onClick={saveEventForm} type="button">Create event</button>
                   </Section>
                 </div>
               )}
@@ -1418,7 +1503,12 @@ export default function App() {
           <DialogHeader>
             <DialogTitle>Edit Event</DialogTitle>
             <DialogDescription>
-              Calendar changes always patch the daemon API and preserve linked tasks.
+              {eventEditor?.rrule
+                ? 'Recurring edits shift the whole series through the daemon API.'
+                : 'Calendar changes always patch the daemon API.'}{' '}
+              {eventEditor?.linked_task_id
+                ? 'Linked tasks remain attached unless you explicitly delete the event.'
+                : 'One-off events update in place.'}
             </DialogDescription>
           </DialogHeader>
           {eventEditor ? (
@@ -1431,6 +1521,9 @@ export default function App() {
             <Field label="Timezone" value={eventEditor.timezone} onChange={(value) => setEventEditor({ ...eventEditor, timezone: value })} />
             <Select label="Event Type" value={eventEditor.event_type} onChange={(value) => setEventEditor({ ...eventEditor, event_type: value as EventType })} options={eventTypes.map((eventType) => ({ value: eventType, label: eventType }))} />
             <Field label="RRULE" value={eventEditor.rrule} onChange={(value) => setEventEditor({ ...eventEditor, rrule: value })} placeholder="Leave empty for one-off" />
+            <p className="mt-2 text-xs uppercase tracking-[0.18em] text-forge-steel">
+              RRULE examples: FREQ=DAILY;COUNT=5 or FREQ=WEEKLY;BYDAY=MO,WE
+            </p>
             <Field label="Notes" value={eventEditor.notes} onChange={(value) => setEventEditor({ ...eventEditor, notes: value })} multiline />
             <div className="mt-4 flex gap-3">
               <button className="forge-button" onClick={saveEventEditor} type="button">Save event</button>
