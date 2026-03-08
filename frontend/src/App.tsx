@@ -1,0 +1,1327 @@
+import {
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import FullCalendar from '@fullcalendar/react'
+import type { EventClickArg, EventDropArg } from '@fullcalendar/core'
+import dayGridPlugin from '@fullcalendar/daygrid'
+import interactionPlugin, {
+  Draggable,
+  type EventReceiveArg,
+  type EventResizeDoneArg,
+} from '@fullcalendar/interaction'
+import listPlugin from '@fullcalendar/list'
+import timeGridPlugin from '@fullcalendar/timegrid'
+import {
+  CalendarRange,
+  CircleDot,
+  ClipboardList,
+  FolderKanban,
+  LoaderCircle,
+  MoreHorizontal,
+  Orbit,
+  PencilLine,
+  Settings2,
+} from 'lucide-react'
+import { forgeApi, resolveApiBaseUrl } from './api'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './components/ui/alert-dialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from './components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from './components/ui/dropdown-menu'
+import { useToast } from './components/ui/use-toast'
+import type {
+  CreateEventRequest,
+  CreateProjectRequest,
+  CreateTaskRequest,
+  EventRecord,
+  EventType,
+  Project,
+  ProjectStatus,
+  Task,
+  TaskListQuery,
+  TaskPriority,
+  TaskStatus,
+  UpdateEventRequest,
+  UpdateProjectRequest,
+  UpdateTaskRequest,
+} from './types'
+
+type Screen = 'today' | 'projects' | 'tasks' | 'calendar' | 'settings'
+
+interface ProjectEditorState {
+  id: number
+  name: string
+  description: string
+  color: string
+  status: ProjectStatus
+  tags: string
+}
+
+interface TaskEditorState {
+  id: number
+  title: string
+  description: string
+  project_id: string
+  priority: TaskPriority
+  due_at: string
+  estimate_minutes: string
+  tags: string
+  notes: string
+  status: TaskStatus
+}
+
+interface EventEditorState {
+  id: number
+  title: string
+  description: string
+  project_id: string
+  start_at: string
+  end_at: string
+  timezone: string
+  event_type: EventType
+  rrule: string
+  notes: string
+}
+
+interface DeleteIntent {
+  kind: 'project' | 'task' | 'event'
+  id: number
+  title: string
+  description: string
+}
+
+const screens: Array<{ id: Screen; label: string; icon: typeof Orbit }> = [
+  { id: 'today', label: 'Today', icon: Orbit },
+  { id: 'projects', label: 'Projects', icon: FolderKanban },
+  { id: 'tasks', label: 'Tasks', icon: ClipboardList },
+  { id: 'calendar', label: 'Calendar', icon: CalendarRange },
+  { id: 'settings', label: 'Settings', icon: Settings2 },
+]
+
+const taskStatuses: Array<TaskStatus | 'all'> = [
+  'all',
+  'todo',
+  'scheduled',
+  'in_progress',
+  'blocked',
+  'done',
+  'canceled',
+]
+const taskPriorities: TaskPriority[] = ['low', 'medium', 'high', 'urgent']
+const projectStatuses: ProjectStatus[] = ['active', 'paused', 'archived']
+const eventTypes: EventType[] = [
+  'meeting',
+  'work_block',
+  'research',
+  'implementation',
+  'admin',
+  'review',
+  'personal',
+  'other',
+]
+
+function fmt(value: string | null) {
+  if (!value) {
+    return 'Unscheduled'
+  }
+  return new Intl.DateTimeFormat('en', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value))
+}
+
+function datetimeLocalToIso(value: string) {
+  return value ? new Date(value).toISOString() : null
+}
+
+function isoToDatetimeLocal(value: string | null) {
+  if (!value) {
+    return ''
+  }
+  const date = new Date(value)
+  const year = date.getFullYear()
+  const month = `${date.getMonth() + 1}`.padStart(2, '0')
+  const day = `${date.getDate()}`.padStart(2, '0')
+  const hours = `${date.getHours()}`.padStart(2, '0')
+  const minutes = `${date.getMinutes()}`.padStart(2, '0')
+  return `${year}-${month}-${day}T${hours}:${minutes}`
+}
+
+function parseTags(input: string) {
+  return input
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+export default function App() {
+  const queryClient = useQueryClient()
+  const { toast } = useToast()
+  const [screen, setScreen] = useState<Screen>('today')
+  const [apiBaseUrl, setApiBaseUrl] = useState('http://127.0.0.1:37241')
+  const [taskSearch, setTaskSearch] = useState('')
+  const deferredTaskSearch = useDeferredValue(taskSearch)
+  const [projectFilter, setProjectFilter] = useState<number | 'all' | 'inbox'>('all')
+  const [statusFilter, setStatusFilter] = useState<TaskStatus | 'all'>('all')
+  const [calendarRange, setCalendarRange] = useState({
+    start: new Date().toISOString(),
+    end: new Date(Date.now() + 1000 * 60 * 60 * 24 * 14).toISOString(),
+  })
+  const externalTasksRef = useRef<HTMLDivElement | null>(null)
+
+  const [projectForm, setProjectForm] = useState<CreateProjectRequest>({
+    name: '',
+    description: '',
+    status: 'active',
+    tags: [],
+    color: '#6f8466',
+  })
+  const [taskForm, setTaskForm] = useState<CreateTaskRequest>({
+    title: '',
+    description: '',
+    project_id: null,
+    status: 'todo',
+    priority: 'medium',
+    due_at: null,
+    scheduled_start: null,
+    scheduled_end: null,
+    estimate_minutes: 60,
+    tags: [],
+    notes: '',
+    source: 'ui',
+  })
+  const [eventForm, setEventForm] = useState<CreateEventRequest>({
+    title: '',
+    description: '',
+    project_id: null,
+    linked_task_id: null,
+    start_at: new Date().toISOString(),
+    end_at: new Date(Date.now() + 1000 * 60 * 60 * 2).toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    event_type: 'implementation',
+    rrule: null,
+    recurrence_exceptions: [],
+    notes: '',
+  })
+  const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null)
+  const [taskEditor, setTaskEditor] = useState<TaskEditorState | null>(null)
+  const [eventEditor, setEventEditor] = useState<EventEditorState | null>(null)
+  const [deleteIntent, setDeleteIntent] = useState<DeleteIntent | null>(null)
+  const [inlineProjectEdit, setInlineProjectEdit] = useState<{ id: number | null; name: string }>({
+    id: null,
+    name: '',
+  })
+  const [inlineTaskEdit, setInlineTaskEdit] = useState<{ id: number | null; title: string }>({
+    id: null,
+    title: '',
+  })
+
+  useEffect(() => {
+    resolveApiBaseUrl().then(setApiBaseUrl).catch(() => {
+      setApiBaseUrl('http://127.0.0.1:37241')
+    })
+  }, [])
+
+  const projectsQuery = useQuery({
+    queryKey: ['projects', apiBaseUrl],
+    queryFn: () => forgeApi.listProjects(apiBaseUrl),
+  })
+
+  const tasksQuery = useQuery({
+    queryKey: ['tasks', apiBaseUrl, projectFilter, statusFilter, deferredTaskSearch],
+    queryFn: () => {
+      const query: TaskListQuery = { search: deferredTaskSearch || undefined }
+      if (projectFilter === 'inbox') {
+        query.inbox_only = true
+      } else if (typeof projectFilter === 'number') {
+        query.project_id = projectFilter
+      }
+      if (statusFilter !== 'all') {
+        query.status = statusFilter
+      }
+      return forgeApi.listTasks(apiBaseUrl, query)
+    },
+  })
+
+  const eventsQuery = useQuery({
+    queryKey: ['events', apiBaseUrl],
+    queryFn: () => forgeApi.listEvents(apiBaseUrl),
+  })
+
+  const todayQuery = useQuery({
+    queryKey: ['today', apiBaseUrl],
+    queryFn: () => forgeApi.getToday(apiBaseUrl),
+  })
+
+  const calendarQuery = useQuery({
+    queryKey: ['calendar', apiBaseUrl, calendarRange.start, calendarRange.end],
+    queryFn: () => forgeApi.calendarRange(apiBaseUrl, calendarRange),
+  })
+
+  const projectSummaries = projectsQuery.data ?? []
+  const tasks = tasksQuery.data ?? []
+  const rawEvents = eventsQuery.data ?? []
+  const calendarEvents = calendarQuery.data ?? []
+  const today = todayQuery.data
+  const projectMap = useMemo(
+    () => new Map(projectSummaries.map((summary) => [summary.project.id, summary.project])),
+    [projectSummaries],
+  )
+
+  const unscheduledTasks = useMemo(
+    () =>
+      tasks.filter(
+        (task) =>
+          !task.scheduled_start &&
+          !task.scheduled_end &&
+          task.status !== 'done' &&
+          task.status !== 'canceled',
+      ),
+    [tasks],
+  )
+
+  useEffect(() => {
+    if (!externalTasksRef.current) {
+      return
+    }
+    const draggable = new Draggable(externalTasksRef.current, {
+      itemSelector: '[data-task-id]',
+      eventData: (element) => ({
+        title: element.getAttribute('data-task-title') ?? 'Task',
+        duration: '01:30',
+      }),
+    })
+    return () => draggable.destroy()
+  }, [unscheduledTasks])
+
+  const invalidate = () =>
+    Promise.all(
+      ['projects', 'tasks', 'events', 'today', 'calendar'].map((key) =>
+        queryClient.invalidateQueries({ queryKey: [key] }),
+      ),
+    )
+
+  function notifyError(title: string, error: unknown) {
+    toast({
+      title,
+      description: error instanceof Error ? error.message : 'Unknown mutation failure',
+      variant: 'destructive',
+    })
+  }
+
+  const createProject = useMutation({
+    mutationFn: (payload: CreateProjectRequest) => forgeApi.createProject(apiBaseUrl, payload),
+    onSuccess: async () => {
+      setProjectForm({ ...projectForm, name: '', description: '' })
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to create project', error),
+  })
+
+  const updateProject = useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: UpdateProjectRequest }) =>
+      forgeApi.updateProject(apiBaseUrl, id, payload),
+    onSuccess: async () => {
+      setProjectEditor(null)
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to update project', error),
+  })
+
+  const deleteProject = useMutation({
+    mutationFn: (id: number) => forgeApi.deleteProject(apiBaseUrl, id),
+    onSuccess: async () => {
+      setScreen('projects')
+      setProjectEditor(null)
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to delete project', error),
+  })
+  const createTask = useMutation({
+    mutationFn: (payload: CreateTaskRequest) => forgeApi.createTask(apiBaseUrl, payload),
+    onSuccess: async () => {
+      setTaskForm({ ...taskForm, title: '', description: '', due_at: null, notes: '' })
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to create task', error),
+  })
+
+  const updateTask = useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: UpdateTaskRequest }) =>
+      forgeApi.updateTask(apiBaseUrl, id, payload),
+    onSuccess: async () => {
+      setTaskEditor(null)
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to update task', error),
+  })
+
+  const deleteTask = useMutation({
+    mutationFn: (id: number) => forgeApi.deleteTask(apiBaseUrl, id),
+    onSuccess: async () => {
+      setTaskEditor(null)
+      setInlineTaskEdit({ id: null, title: '' })
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to delete task', error),
+  })
+
+  const completeTask = useMutation({
+    mutationFn: (taskId: number) => forgeApi.completeTask(apiBaseUrl, taskId),
+    onSuccess: invalidate,
+    onError: (error) => notifyError('Failed to complete task', error),
+  })
+
+  const clearDone = useMutation({
+    mutationFn: () => forgeApi.clearDone(apiBaseUrl),
+    onSuccess: invalidate,
+    onError: (error) => notifyError('Failed to clear completed tasks', error),
+  })
+
+  const createEvent = useMutation({
+    mutationFn: (payload: CreateEventRequest) => forgeApi.createEvent(apiBaseUrl, payload),
+    onSuccess: invalidate,
+    onError: (error) => notifyError('Failed to create event', error),
+  })
+
+  const updateEvent = useMutation({
+    mutationFn: ({ id, payload }: { id: number; payload: UpdateEventRequest }) =>
+      forgeApi.updateEvent(apiBaseUrl, id, payload),
+    onSuccess: async () => {
+      setEventEditor(null)
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to update event', error),
+  })
+
+  const deleteEvent = useMutation({
+    mutationFn: (id: number) => forgeApi.deleteEvent(apiBaseUrl, id),
+    onSuccess: async () => {
+      setEventEditor(null)
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to delete event', error),
+  })
+
+  const loading =
+    projectsQuery.isLoading ||
+    tasksQuery.isLoading ||
+    eventsQuery.isLoading ||
+    todayQuery.isLoading ||
+    calendarQuery.isLoading
+
+  async function handleTaskReceive(arg: EventReceiveArg) {
+    const taskId = Number(arg.draggedEl.getAttribute('data-task-id'))
+    const task = unscheduledTasks.find((item) => item.id === taskId)
+    if (!task) {
+      arg.revert()
+      return
+    }
+    const start = arg.event.start ?? new Date()
+    const end = arg.event.end ?? new Date(start.getTime() + 1000 * 60 * 90)
+    try {
+      await createEvent.mutateAsync({
+        title: task.title,
+        description: task.description,
+        project_id: task.project_id,
+        linked_task_id: task.id,
+        start_at: start.toISOString(),
+        end_at: end.toISOString(),
+        timezone: eventForm.timezone,
+        event_type: 'implementation',
+        rrule: null,
+        recurrence_exceptions: [],
+        notes: task.notes,
+      })
+    } catch {
+      arg.revert()
+    }
+  }
+
+  async function handleEventDrop(arg: EventDropArg) {
+    const eventId = Number(arg.event.extendedProps.eventId)
+    const isRecurring = Boolean(arg.event.extendedProps.isRecurring)
+    if (isRecurring) {
+      arg.revert()
+      toast({
+        title: 'Recurring events stay fixed',
+        description: 'Recurring events cannot be rescheduled by drag yet.',
+        variant: 'destructive',
+      })
+      return
+    }
+    const original = rawEvents.find((event) => event.id === eventId)
+    if (!original || !arg.event.start) {
+      arg.revert()
+      return
+    }
+    const fallbackDuration =
+      new Date(original.end_at).getTime() - new Date(original.start_at).getTime()
+    const nextEnd = arg.event.end ?? new Date(arg.event.start.getTime() + fallbackDuration)
+    try {
+      await updateEvent.mutateAsync({
+        id: eventId,
+        payload: {
+          start_at: arg.event.start.toISOString(),
+          end_at: nextEnd.toISOString(),
+        },
+      })
+    } catch {
+      arg.revert()
+    }
+  }
+
+  async function handleEventResize(arg: EventResizeDoneArg) {
+    const eventId = Number(arg.event.extendedProps.eventId)
+    const isRecurring = Boolean(arg.event.extendedProps.isRecurring)
+    if (isRecurring) {
+      arg.revert()
+      toast({
+        title: 'Recurring events stay fixed',
+        description: 'Recurring events cannot be resized from the calendar yet.',
+        variant: 'destructive',
+      })
+      return
+    }
+    if (!arg.event.start || !arg.event.end) {
+      arg.revert()
+      return
+    }
+    try {
+      await updateEvent.mutateAsync({
+        id: eventId,
+        payload: {
+          start_at: arg.event.start.toISOString(),
+          end_at: arg.event.end.toISOString(),
+        },
+      })
+    } catch {
+      arg.revert()
+    }
+  }
+
+  function handleEventClick(arg: EventClickArg) {
+    const eventId = Number(arg.event.extendedProps.eventId)
+    const event = rawEvents.find((item) => item.id === eventId)
+    if (!event) {
+      return
+    }
+    setEventEditor({
+      id: event.id,
+      title: event.title,
+      description: event.description,
+      project_id: event.project_id === null ? 'unassigned' : String(event.project_id),
+      start_at: isoToDatetimeLocal(event.start_at),
+      end_at: isoToDatetimeLocal(event.end_at),
+      timezone: event.timezone,
+      event_type: event.event_type,
+      rrule: event.rrule ?? '',
+      notes: event.notes,
+    })
+  }
+
+  function openProjectEditor(project: Project) {
+    setProjectEditor({
+      id: project.id,
+      name: project.name,
+      description: project.description,
+      color: project.color,
+      status: project.status,
+      tags: project.tags.join(', '),
+    })
+  }
+
+  function openTaskEditor(task: Task) {
+    setTaskEditor({
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      project_id: task.project_id === null ? 'inbox' : String(task.project_id),
+      priority: task.priority,
+      due_at: isoToDatetimeLocal(task.due_at),
+      estimate_minutes: task.estimate_minutes ? String(task.estimate_minutes) : '',
+      tags: task.tags.join(', '),
+      notes: task.notes,
+      status: task.status,
+    })
+  }
+
+  async function saveInlineTaskTitle(taskId: number) {
+    if (!inlineTaskEdit.title.trim()) {
+      return
+    }
+    await updateTask.mutateAsync({
+      id: taskId,
+      payload: { title: inlineTaskEdit.title.trim(), source: 'ui' },
+    })
+    setInlineTaskEdit({ id: null, title: '' })
+  }
+
+  async function saveInlineProjectName(projectId: number) {
+    if (!inlineProjectEdit.name.trim()) {
+      return
+    }
+    await updateProject.mutateAsync({
+      id: projectId,
+      payload: { name: inlineProjectEdit.name.trim() },
+    })
+    setInlineProjectEdit({ id: null, name: '' })
+  }
+
+  function requestDeleteProject(project: Project) {
+    setDeleteIntent({
+      kind: 'project',
+      id: project.id,
+      title: project.name,
+      description:
+        'Tasks in this project will be moved to Inbox. This action cannot be undone.',
+    })
+  }
+
+  function requestDeleteTask(task: Task) {
+    const linkedEvents = rawEvents.filter((event) => event.linked_task_id === task.id)
+    setDeleteIntent({
+      kind: 'task',
+      id: task.id,
+      title: task.title,
+      description: linkedEvents.length
+        ? 'This task has scheduled calendar blocks. Deleting the task will remove them as well.'
+        : 'This task will be removed permanently.',
+    })
+  }
+
+  function requestDeleteEvent(event: EventRecord) {
+    setDeleteIntent({
+      kind: 'event',
+      id: event.id,
+      title: event.title,
+      description: 'The linked task will remain.',
+    })
+  }
+
+  async function confirmDeleteIntent() {
+    if (!deleteIntent) {
+      return
+    }
+    if (deleteIntent.kind === 'project') {
+      await deleteProject.mutateAsync(deleteIntent.id)
+    }
+    if (deleteIntent.kind === 'task') {
+      await deleteTask.mutateAsync(deleteIntent.id)
+    }
+    if (deleteIntent.kind === 'event') {
+      await deleteEvent.mutateAsync(deleteIntent.id)
+    }
+    setDeleteIntent(null)
+  }
+
+  useEffect(() => {
+    function handleDeleteShortcut(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      const typing =
+        target &&
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      if (event.key !== 'Delete' || typing) {
+        return
+      }
+
+      if (taskEditor) {
+        const task = tasks.find((item) => item.id === taskEditor.id)
+        if (task) {
+          requestDeleteTask(task)
+        }
+      } else if (eventEditor) {
+        const activeEvent = rawEvents.find((item) => item.id === eventEditor.id)
+        if (activeEvent) {
+          requestDeleteEvent(activeEvent)
+        }
+      }
+    }
+
+    window.addEventListener('keydown', handleDeleteShortcut)
+    return () => window.removeEventListener('keydown', handleDeleteShortcut)
+  }, [eventEditor, rawEvents, taskEditor, tasks])
+
+  const fullCalendarEvents = calendarEvents.map((event) => {
+    const project = event.project_id ? projectMap.get(event.project_id) : undefined
+    return {
+      id: `${event.event_id}:${event.occurrence_start}`,
+      title: event.title,
+      start: event.occurrence_start,
+      end: event.occurrence_end,
+      backgroundColor: project?.color ?? '#8a7d68',
+      borderColor: project?.color ?? '#8a7d68',
+      extendedProps: {
+        eventId: event.event_id,
+        isRecurring: event.is_recurring,
+      },
+    }
+  })
+
+  return (
+    <div className="min-h-screen bg-[#ece4d8] text-forge-ink">
+      <div className="mx-auto flex min-h-screen max-w-[1600px] gap-6 p-4 md:p-6">
+        <aside className="w-full max-w-[290px] rounded-[30px] border border-forge-steel/35 bg-forge-night p-5 text-forge-paper shadow-panel">
+          <p className="text-xs uppercase tracking-[0.35em] text-forge-steel">Forge</p>
+          <h1 className="mt-2 font-display text-4xl">Work OS</h1>
+          <p className="mt-3 text-sm text-white/70">
+            Local execution, scheduling, and mutation through one write path.
+          </p>
+
+          <nav className="mt-6 space-y-2">
+            {screens.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left ${
+                  screen === id ? 'bg-[#f2ece0] text-forge-night' : 'bg-white/5 text-white/80'
+                }`}
+                onClick={() => startTransition(() => setScreen(id))}
+                type="button"
+              >
+                <Icon className="size-4" />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+
+          <div className="mt-8 grid grid-cols-2 gap-3 rounded-[26px] border border-white/10 bg-white/5 p-4 text-sm">
+            <Stat label="Projects" value={String(projectSummaries.length)} />
+            <Stat label="Tasks" value={String(tasks.length)} />
+            <Stat label="Events" value={String(rawEvents.length)} />
+            <Stat label="API" value={todayQuery.isError ? 'down' : 'ready'} />
+          </div>
+        </aside>
+
+        <main className="flex-1">
+          <header className="rounded-[34px] border border-forge-steel/35 bg-[radial-gradient(circle_at_top_left,_rgba(217,107,43,0.24),_transparent_42%),linear-gradient(135deg,#201b17,#332b24)] p-6 text-forge-paper shadow-panel">
+            <p className="text-xs uppercase tracking-[0.35em] text-[#c7b39c]">Operator View</p>
+            <h2 className="mt-3 max-w-3xl font-display text-4xl leading-tight md:text-5xl">
+              Build with force, not fragmentation.
+            </h2>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <Metric label="Date" value={today?.date ?? new Date().toISOString().slice(0, 10)} />
+              <Metric
+                label="Focus"
+                value={
+                  today?.focus?.task_id
+                    ? `Task #${today.focus.task_id}`
+                    : today?.focus?.project_id
+                      ? `Project #${today.focus.project_id}`
+                      : 'Unset'
+                }
+              />
+              <Metric label="API" value={apiBaseUrl} subtle />
+            </div>
+          </header>
+          {loading ? (
+            <div className="mt-6 flex items-center gap-3 rounded-3xl border border-forge-steel/30 bg-white/80 px-5 py-4">
+              <LoaderCircle className="size-4 animate-spin text-forge-ember" />
+              <span className="text-sm">Loading Forge state...</span>
+            </div>
+          ) : (
+            <div className="mt-6">
+              {screen === 'today' && today && (
+                <div className="grid gap-5 xl:grid-cols-[1.2fr,0.9fr]">
+                  <Section title="Execution Queue" eyebrow="Today">
+                    {today.today_tasks.length === 0 ? (
+                      <Empty label="No tasks are scheduled or due today." />
+                    ) : (
+                      today.today_tasks.map((task) => (
+                        <TaskCard
+                          key={task.id}
+                          task={task}
+                          project={task.project_id ? projectMap.get(task.project_id) : undefined}
+                          onComplete={() => completeTask.mutate(task.id)}
+                          onEdit={() => openTaskEditor(task)}
+                          onDelete={() => requestDeleteTask(task)}
+                        />
+                      ))
+                    )}
+                  </Section>
+                  <div className="grid gap-5">
+                    <Section title="Today on the Clock" eyebrow="Calendar">
+                      {today.today_events.length === 0 ? (
+                        <Empty label="Nothing scheduled today." />
+                      ) : (
+                        today.today_events.map((event) => (
+                          <EventOccurrenceCard
+                            key={`${event.event_id}:${event.occurrence_start}`}
+                            event={event}
+                            project={event.project_id ? projectMap.get(event.project_id) : undefined}
+                          />
+                        ))
+                      )}
+                    </Section>
+                    <Section title="Overdue" eyebrow="Recovery">
+                      {today.overdue_tasks.length === 0 ? (
+                        <Empty label="No overdue tasks." compact />
+                      ) : (
+                        today.overdue_tasks.map((task) => (
+                          <TaskCard
+                            key={task.id}
+                            task={task}
+                            project={task.project_id ? projectMap.get(task.project_id) : undefined}
+                            onComplete={() => completeTask.mutate(task.id)}
+                            onEdit={() => openTaskEditor(task)}
+                            onDelete={() => requestDeleteTask(task)}
+                            compact
+                          />
+                        ))
+                      )}
+                    </Section>
+                  </div>
+                </div>
+              )}
+
+              {screen === 'projects' && (
+                <div className="grid gap-5 xl:grid-cols-[1.2fr,0.8fr]">
+                  <Section title="Active Surfaces" eyebrow="Projects">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      {projectSummaries.map((summary) => (
+                        <article key={summary.project.id} className="rounded-[26px] border border-forge-steel/20 bg-[#f9f6f0] p-5">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="h-3 w-20 rounded-full" style={{ backgroundColor: summary.project.color }} />
+                            <div className="flex gap-2">
+                              <button className="icon-button" onClick={() => openProjectEditor(summary.project)} type="button"><PencilLine className="size-4" /></button>
+                            </div>
+                          </div>
+                          {inlineProjectEdit.id === summary.project.id ? (
+                            <input
+                              autoFocus
+                              className="forge-input mt-4 font-display text-2xl"
+                              value={inlineProjectEdit.name}
+                              onBlur={() => void saveInlineProjectName(summary.project.id)}
+                              onChange={(event) => setInlineProjectEdit({ id: summary.project.id, name: event.target.value })}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') {
+                                  event.preventDefault()
+                                  void saveInlineProjectName(summary.project.id)
+                                }
+                                if (event.key === 'Escape') {
+                                  setInlineProjectEdit({ id: null, name: '' })
+                                }
+                              }}
+                            />
+                          ) : (
+                            <button
+                              className="mt-4 text-left font-display text-3xl text-forge-night"
+                              onClick={() =>
+                                setInlineProjectEdit({ id: summary.project.id, name: summary.project.name })
+                              }
+                              type="button"
+                            >
+                              {summary.project.name}
+                            </button>
+                          )}
+                          <p className="mt-2 text-sm text-forge-night/70">{summary.project.description || 'No description yet.'}</p>
+                          <div className="mt-4 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.22em] text-forge-steel">
+                            <span>{summary.project.status}</span>
+                            {summary.project.tags.map((tag) => (
+                              <span key={tag} className="rounded-full bg-forge-paper px-3 py-1">{tag}</span>
+                            ))}
+                          </div>
+                          <div className="mt-4 grid grid-cols-2 gap-3">
+                            <Stat label="Open" value={String(summary.open_task_count)} />
+                            <Stat label="Upcoming" value={String(summary.upcoming_event_count)} />
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </Section>
+                  <Section title={projectEditor ? 'Edit Project' : 'Add Project'} eyebrow={projectEditor ? 'Metadata' : 'New'}>
+                    {projectEditor ? (
+                      <>
+                        <Field label="Name" value={projectEditor.name} onChange={(value) => setProjectEditor({ ...projectEditor, name: value })} />
+                        <Field label="Description" value={projectEditor.description} onChange={(value) => setProjectEditor({ ...projectEditor, description: value })} multiline />
+                        <Select label="Status" value={projectEditor.status} onChange={(value) => setProjectEditor({ ...projectEditor, status: value as ProjectStatus })} options={projectStatuses.map((status) => ({ value: status, label: status }))} />
+                        <Field label="Tags" value={projectEditor.tags} onChange={(value) => setProjectEditor({ ...projectEditor, tags: value })} placeholder="infra, backend" />
+                        <Field label="Color" value={projectEditor.color} onChange={(value) => setProjectEditor({ ...projectEditor, color: value })} type="color" />
+                            <div className="mt-4 flex gap-3">
+                              <button className="forge-button" onClick={() => updateProject.mutate({ id: projectEditor.id, payload: { name: projectEditor.name, description: projectEditor.description, status: projectEditor.status, tags: parseTags(projectEditor.tags), color: projectEditor.color } })} type="button">Save project</button>
+                              <button className="forge-button forge-button-muted" onClick={() => setProjectEditor(null)} type="button">Cancel</button>
+                            </div>
+                            <div className="mt-8 rounded-[24px] border border-[#8f3424]/18 bg-[#fff5f2] p-4">
+                              <div className="text-[11px] uppercase tracking-[0.24em] text-[#8f3424]">Danger Zone</div>
+                              <p className="mt-3 text-sm text-forge-night/72">
+                                Delete the project and move its tasks to Inbox.
+                              </p>
+                              <button
+                                className="forge-button forge-button-danger mt-4"
+                                onClick={() => {
+                                  const project = projectMap.get(projectEditor.id)
+                                  if (project) {
+                                    requestDeleteProject(project)
+                                  }
+                                }}
+                                type="button"
+                              >
+                                Delete project
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                      <>
+                        <Field label="Name" value={projectForm.name} onChange={(value) => setProjectForm({ ...projectForm, name: value })} />
+                        <Field label="Description" value={projectForm.description} onChange={(value) => setProjectForm({ ...projectForm, description: value })} multiline />
+                        <Field label="Color" value={projectForm.color} onChange={(value) => setProjectForm({ ...projectForm, color: value })} type="color" />
+                        <button className="forge-button mt-4" onClick={() => createProject.mutate(projectForm)} type="button">Create project</button>
+                      </>
+                    )}
+                  </Section>
+                </div>
+              )}
+
+              {screen === 'tasks' && (
+                <div className="grid gap-5 xl:grid-cols-[1.2fr,0.8fr]">
+                  <Section title="Filter and Execute" eyebrow="Tasks">
+                    <div className="grid gap-3 md:grid-cols-4">
+                      <Field label="Search" value={taskSearch} onChange={setTaskSearch} />
+                      <Select
+                        label="Project"
+                        value={String(projectFilter)}
+                        onChange={(value) => setProjectFilter(value === 'all' || value === 'inbox' ? value : Number(value))}
+                        options={[
+                          { value: 'all', label: 'All projects' },
+                          { value: 'inbox', label: 'Inbox only' },
+                          ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name })),
+                        ]}
+                      />
+                      <Select
+                        label="Status"
+                        value={statusFilter}
+                        onChange={(value) => setStatusFilter(value as TaskStatus | 'all')}
+                        options={taskStatuses.map((status) => ({ value: status, label: status }))}
+                      />
+                      <button className="forge-button self-end" onClick={() => clearDone.mutate()} type="button">Clear done</button>
+                    </div>
+                    <div className="mt-5 space-y-3">
+                      {tasks.length === 0 ? (
+                        <Empty label="No tasks match this filter." />
+                      ) : (
+                        tasks.map((task) => (
+                          <TaskCard
+                            key={task.id}
+                            task={task}
+                            project={task.project_id ? projectMap.get(task.project_id) : undefined}
+                            onComplete={task.status === 'done' ? undefined : () => completeTask.mutate(task.id)}
+                            onEdit={() => openTaskEditor(task)}
+                            onDelete={() => requestDeleteTask(task)}
+                            compact
+                            titleSlot={
+                              inlineTaskEdit.id === task.id ? (
+                                <input
+                                  autoFocus
+                                  className="forge-input mt-3"
+                                  value={inlineTaskEdit.title}
+                                  onBlur={() => void saveInlineTaskTitle(task.id)}
+                                  onChange={(event) => setInlineTaskEdit({ id: task.id, title: event.target.value })}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter') {
+                                      event.preventDefault()
+                                      void saveInlineTaskTitle(task.id)
+                                    }
+                                    if (event.key === 'Escape') {
+                                      setInlineTaskEdit({ id: null, title: '' })
+                                    }
+                                  }}
+                                />
+                              ) : undefined
+                            }
+                            onInlineEdit={() => setInlineTaskEdit({ id: task.id, title: task.title })}
+                          />
+                        ))
+                      )}
+                    </div>
+                  </Section>
+                  <Section title="Quick Add" eyebrow="Capture">
+                    <Field label="Title" value={taskForm.title} onChange={(value) => setTaskForm({ ...taskForm, title: value })} />
+                    <Field label="Description" value={taskForm.description} onChange={(value) => setTaskForm({ ...taskForm, description: value })} multiline />
+                    <Select label="Project" value={String(taskForm.project_id ?? 'inbox')} onChange={(value) => setTaskForm({ ...taskForm, project_id: value === 'inbox' ? null : Number(value) })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
+                    <Select label="Priority" value={taskForm.priority} onChange={(value) => setTaskForm({ ...taskForm, priority: value as TaskPriority })} options={taskPriorities.map((priority) => ({ value: priority, label: priority }))} />
+                    <Field label="Due" value={isoToDatetimeLocal(taskForm.due_at)} onChange={(value) => setTaskForm({ ...taskForm, due_at: datetimeLocalToIso(value) })} type="datetime-local" />
+                    <button className="forge-button mt-4" onClick={() => createTask.mutate(taskForm)} type="button">Create task</button>
+                  </Section>
+                </div>
+              )}
+
+              {screen === 'calendar' && (
+                <div className="grid gap-5 xl:grid-cols-[1.2fr,0.8fr]">
+                  <Section title="Block the Work" eyebrow="Calendar">
+                    <div className="grid gap-5 xl:grid-cols-[1.45fr,0.65fr]">
+                      <div className="overflow-hidden rounded-[28px] border border-forge-steel/20 bg-white p-3">
+                        <FullCalendar
+                          plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
+                          initialView="timeGridWeek"
+                          headerToolbar={{ left: 'prev,next today', center: 'title', right: 'timeGridDay,timeGridWeek,dayGridMonth,listWeek' }}
+                          events={fullCalendarEvents}
+                          height={720}
+                          droppable
+                          editable
+                          allDaySlot={false}
+                          eventReceive={(arg) => void handleTaskReceive(arg)}
+                          eventDrop={(arg) => void handleEventDrop(arg)}
+                          eventResize={(arg) => void handleEventResize(arg)}
+                          eventClick={handleEventClick}
+                          datesSet={(arg) => setCalendarRange({ start: arg.start.toISOString(), end: arg.end.toISOString() })}
+                        />
+                      </div>
+                      <div ref={externalTasksRef} className="rounded-[28px] border border-forge-steel/20 bg-[#f8f4ed] p-4">
+                        <p className="text-xs uppercase tracking-[0.3em] text-forge-steel">Drag Source</p>
+                        <h3 className="mt-2 font-display text-2xl">Unscheduled tasks</h3>
+                        <div className="mt-4 space-y-3">
+                          {unscheduledTasks.length === 0 ? (
+                            <Empty label="Nothing waiting for a work block." compact />
+                          ) : (
+                            unscheduledTasks.map((task) => (
+                              <div key={task.id} data-task-id={task.id} data-task-title={task.title} className="cursor-grab rounded-3xl border border-forge-steel/20 bg-white px-4 py-3">
+                                <div className="font-medium">{task.title}</div>
+                                <div className="mt-1 text-xs uppercase tracking-[0.2em] text-forge-steel">
+                                  {task.project_id ? projectMap.get(task.project_id)?.name ?? `Project #${task.project_id}` : 'Inbox task'}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </Section>
+                  <Section title="Create Event" eyebrow="Direct">
+                    <Field label="Title" value={eventForm.title} onChange={(value) => setEventForm({ ...eventForm, title: value })} />
+                    <Select label="Project" value={eventForm.project_id === null ? 'unassigned' : String(eventForm.project_id)} onChange={(value) => setEventForm({ ...eventForm, project_id: value === 'unassigned' ? null : Number(value) })} options={[{ value: 'unassigned', label: 'Unassigned' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
+                    <Field label="Start" value={isoToDatetimeLocal(eventForm.start_at)} onChange={(value) => setEventForm({ ...eventForm, start_at: datetimeLocalToIso(value) ?? eventForm.start_at })} type="datetime-local" />
+                    <Field label="End" value={isoToDatetimeLocal(eventForm.end_at)} onChange={(value) => setEventForm({ ...eventForm, end_at: datetimeLocalToIso(value) ?? eventForm.end_at })} type="datetime-local" />
+                    <Select label="Event Type" value={eventForm.event_type} onChange={(value) => setEventForm({ ...eventForm, event_type: value as EventType })} options={eventTypes.map((eventType) => ({ value: eventType, label: eventType }))} />
+                    <Field label="RRULE" value={eventForm.rrule ?? ''} onChange={(value) => setEventForm({ ...eventForm, rrule: value || null })} placeholder="FREQ=WEEKLY;BYDAY=MO,WE" />
+                    <button className="forge-button mt-4" onClick={() => createEvent.mutate(eventForm)} type="button">Create event</button>
+                  </Section>
+                </div>
+              )}
+
+              {screen === 'settings' && (
+                <div className="grid gap-5 md:grid-cols-3">
+                  <Section title="Local API" eyebrow="Runtime">
+                    <Setting label="Base URL" value={apiBaseUrl} />
+                    <Setting label="Mode" value="Loopback-only, local-first" />
+                  </Section>
+                  <Section title="Paths" eyebrow="Storage">
+                    <Setting label="Database" value="~/.forge/forge.db" />
+                    <Setting label="Config" value="~/.forge/config.toml" />
+                    <Setting label="Logs" value="~/.forge/logs/" />
+                  </Section>
+                  <Section title="Defaults" eyebrow="Environment">
+                    <Setting label="Timezone" value={eventForm.timezone} />
+                    <Setting label="Calendar span" value={`${calendarEvents.length} loaded events`} />
+                  </Section>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
+      </div>
+
+      <Dialog open={taskEditor !== null} onOpenChange={(open) => !open && setTaskEditor(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Task</DialogTitle>
+            <DialogDescription>
+              Fast structural edits without leaving the execution surface.
+            </DialogDescription>
+          </DialogHeader>
+          {taskEditor ? (
+            <>
+            <Field label="Title" value={taskEditor.title} onChange={(value) => setTaskEditor({ ...taskEditor, title: value })} />
+            <Field label="Description" value={taskEditor.description} onChange={(value) => setTaskEditor({ ...taskEditor, description: value })} multiline />
+            <Select label="Project" value={taskEditor.project_id} onChange={(value) => setTaskEditor({ ...taskEditor, project_id: value })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
+            <Select label="Status" value={taskEditor.status} onChange={(value) => setTaskEditor({ ...taskEditor, status: value as TaskStatus })} options={taskStatuses.filter((value) => value !== 'all').map((status) => ({ value: status, label: status }))} />
+            <Select label="Priority" value={taskEditor.priority} onChange={(value) => setTaskEditor({ ...taskEditor, priority: value as TaskPriority })} options={taskPriorities.map((priority) => ({ value: priority, label: priority }))} />
+            <Field label="Due" value={taskEditor.due_at} onChange={(value) => setTaskEditor({ ...taskEditor, due_at: value })} type="datetime-local" />
+            <Field label="Estimate (minutes)" value={taskEditor.estimate_minutes} onChange={(value) => setTaskEditor({ ...taskEditor, estimate_minutes: value })} type="number" />
+            <Field label="Tags" value={taskEditor.tags} onChange={(value) => setTaskEditor({ ...taskEditor, tags: value })} placeholder="ops, infra" />
+            <Field label="Notes" value={taskEditor.notes} onChange={(value) => setTaskEditor({ ...taskEditor, notes: value })} multiline />
+            <div className="mt-4 flex gap-3">
+              <button className="forge-button" onClick={() => updateTask.mutate({ id: taskEditor.id, payload: { title: taskEditor.title, description: taskEditor.description, project_id: taskEditor.project_id === 'inbox' ? null : Number(taskEditor.project_id), priority: taskEditor.priority, due_at: datetimeLocalToIso(taskEditor.due_at), estimate_minutes: taskEditor.estimate_minutes ? Number(taskEditor.estimate_minutes) : null, tags: parseTags(taskEditor.tags), notes: taskEditor.notes, status: taskEditor.status, source: 'ui' } })} type="button">Save task</button>
+              <button className="forge-button forge-button-muted" onClick={() => setTaskEditor(null)} type="button">Cancel</button>
+              <button className="forge-button forge-button-danger ml-auto" onClick={() => {
+                const task = tasks.find((item) => item.id === taskEditor.id)
+                if (task) {
+                  requestDeleteTask(task)
+                }
+              }} type="button">Delete Task</button>
+            </div>
+          </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={eventEditor !== null} onOpenChange={(open) => !open && setEventEditor(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Event</DialogTitle>
+            <DialogDescription>
+              Calendar changes always patch the daemon API and preserve linked tasks.
+            </DialogDescription>
+          </DialogHeader>
+          {eventEditor ? (
+            <>
+            <Field label="Title" value={eventEditor.title} onChange={(value) => setEventEditor({ ...eventEditor, title: value })} />
+            <Field label="Description" value={eventEditor.description} onChange={(value) => setEventEditor({ ...eventEditor, description: value })} multiline />
+            <Select label="Project" value={eventEditor.project_id} onChange={(value) => setEventEditor({ ...eventEditor, project_id: value })} options={[{ value: 'unassigned', label: 'Unassigned' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
+            <Field label="Start" value={eventEditor.start_at} onChange={(value) => setEventEditor({ ...eventEditor, start_at: value })} type="datetime-local" />
+            <Field label="End" value={eventEditor.end_at} onChange={(value) => setEventEditor({ ...eventEditor, end_at: value })} type="datetime-local" />
+            <Field label="Timezone" value={eventEditor.timezone} onChange={(value) => setEventEditor({ ...eventEditor, timezone: value })} />
+            <Select label="Event Type" value={eventEditor.event_type} onChange={(value) => setEventEditor({ ...eventEditor, event_type: value as EventType })} options={eventTypes.map((eventType) => ({ value: eventType, label: eventType }))} />
+            <Field label="RRULE" value={eventEditor.rrule} onChange={(value) => setEventEditor({ ...eventEditor, rrule: value })} placeholder="Leave empty for one-off" />
+            <Field label="Notes" value={eventEditor.notes} onChange={(value) => setEventEditor({ ...eventEditor, notes: value })} multiline />
+            <div className="mt-4 flex gap-3">
+              <button className="forge-button" onClick={() => updateEvent.mutate({ id: eventEditor.id, payload: { title: eventEditor.title, description: eventEditor.description, project_id: eventEditor.project_id === 'unassigned' ? null : Number(eventEditor.project_id), start_at: datetimeLocalToIso(eventEditor.start_at) ?? undefined, end_at: datetimeLocalToIso(eventEditor.end_at) ?? undefined, timezone: eventEditor.timezone, event_type: eventEditor.event_type, rrule: eventEditor.rrule || null, notes: eventEditor.notes } })} type="button">Save event</button>
+              <button className="forge-button forge-button-muted" onClick={() => setEventEditor(null)} type="button">Cancel</button>
+              <button
+                className="forge-button forge-button-danger ml-auto"
+                onClick={() => {
+                  const event = rawEvents.find((item) => item.id === eventEditor.id)
+                  if (event) {
+                    requestDeleteEvent(event)
+                  }
+                }}
+                type="button"
+              >
+                Delete
+              </button>
+            </div>
+          </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={deleteIntent !== null} onOpenChange={(open) => !open && setDeleteIntent(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {deleteIntent?.kind === 'project'
+                ? 'Delete Project?'
+                : deleteIntent?.kind === 'task'
+                  ? 'Delete Task?'
+                  : 'Delete Event?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>{deleteIntent?.description}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void confirmDeleteIntent()}>
+              {deleteIntent?.kind === 'project'
+                ? 'Delete Project'
+                : deleteIntent?.kind === 'task'
+                  ? 'Delete Task'
+                  : 'Delete Event'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+}
+
+function Section({ eyebrow, title, children }: { eyebrow: string; title: string; children: ReactNode }) {
+  return (
+    <section className="rounded-[30px] border border-forge-steel/25 bg-white/80 p-5 shadow-panel">
+      <p className="text-xs uppercase tracking-[0.3em] text-forge-steel">{eyebrow}</p>
+      <h3 className="mt-2 font-display text-3xl text-forge-night">{title}</h3>
+      <div className="mt-5">{children}</div>
+    </section>
+  )
+}
+function TaskCard({
+  task,
+  project,
+  onComplete,
+  onEdit,
+  onDelete,
+  onInlineEdit,
+  titleSlot,
+  compact = false,
+}: {
+  task: Task
+  project?: Project
+  onComplete?: () => void
+  onEdit?: () => void
+  onDelete?: () => void
+  onInlineEdit?: () => void
+  titleSlot?: ReactNode
+  compact?: boolean
+}) {
+  return (
+    <div className="rounded-[24px] border border-forge-steel/20 bg-[#f9f6f0] p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded-full bg-forge-paper px-3 py-1 text-[11px] uppercase tracking-[0.25em] text-forge-steel">{task.status.replace('_', ' ')}</span>
+            <span className="rounded-full px-3 py-1 text-[11px] uppercase tracking-[0.25em]" style={{ backgroundColor: `${project?.color ?? '#8a7d68'}22`, color: '#25211c' }}>{project?.name ?? 'Inbox'}</span>
+          </div>
+          {titleSlot ?? <div className="mt-3 text-lg font-medium text-forge-night">{task.title}</div>}
+          {!compact && task.description ? <p className="mt-2 text-sm text-forge-night/70">{task.description}</p> : null}
+          {task.completed_at ? (
+            <p className="mt-2 text-xs uppercase tracking-[0.2em] text-forge-steel">
+              Completed {fmt(task.completed_at)}
+            </p>
+          ) : null}
+        </div>
+        <div className="text-right text-xs uppercase tracking-[0.2em] text-forge-steel">
+          <div>{task.priority}</div>
+          <div className="mt-2">{fmt(task.due_at ?? task.scheduled_start)}</div>
+        </div>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2">
+        {onComplete ? <button className="forge-button" onClick={onComplete} type="button">Mark done</button> : null}
+        {(onInlineEdit || onEdit || onDelete) ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="icon-button" type="button">
+                <MoreHorizontal className="size-4" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {onInlineEdit ? (
+                <DropdownMenuItem onSelect={onInlineEdit}>
+                  Rename inline
+                </DropdownMenuItem>
+              ) : null}
+              {onEdit ? (
+                <DropdownMenuItem onSelect={onEdit}>Edit task</DropdownMenuItem>
+              ) : null}
+              {onDelete ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className="text-[#8f3424] focus:bg-[#f6ddd6] focus:text-[#8f3424]"
+                    onSelect={onDelete}
+                  >
+                    Delete task
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function EventOccurrenceCard({ event, project }: { event: { event_type: EventType; title: string; occurrence_start: string }; project?: Project }) {
+  return (
+    <div className="rounded-[24px] border border-forge-steel/20 bg-[#fbf7f1] p-4">
+      <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-forge-steel">
+        <span>{event.event_type.replace('_', ' ')}</span>
+        <span>{project?.name ?? 'Unassigned'}</span>
+      </div>
+      <div className="mt-2 text-base font-medium">{event.title}</div>
+      <div className="mt-2 text-sm text-forge-night/70">{fmt(event.occurrence_start)}</div>
+    </div>
+  )
+}
+
+function Field({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  multiline = false,
+  placeholder,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  type?: string
+  multiline?: boolean
+  placeholder?: string
+}) {
+  return (
+    <label className="block space-y-2 text-sm font-medium text-forge-night/80">
+      <span>{label}</span>
+      {multiline ? (
+        <textarea className="forge-input min-h-28 resize-none" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      ) : (
+        <input className="forge-input" type={type} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
+      )}
+    </label>
+  )
+}
+
+function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }> }) {
+  return (
+    <label className="block space-y-2 text-sm font-medium text-forge-night/80">
+      <span>{label}</span>
+      <select className="forge-input" value={value} onChange={(event) => onChange(event.target.value)}>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+function Empty({ label, compact = false }: { label: string; compact?: boolean }) {
+  return (
+    <div className={`rounded-[24px] border border-dashed border-forge-steel/25 bg-[#f7f2ea] p-4 ${compact ? '' : 'py-6'}`}>
+      <div className="flex items-center gap-3 text-sm text-forge-night/70">
+        <CircleDot className="size-4 text-forge-ember" />
+        <span>{label}</span>
+      </div>
+    </div>
+  )
+}
+
+function Stat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3">
+      <div className="text-[11px] uppercase tracking-[0.25em] text-forge-steel">{label}</div>
+      <div className="mt-2 text-lg font-semibold text-white">{value}</div>
+    </div>
+  )
+}
+
+function Metric({ label, value, subtle = false }: { label: string; value: string; subtle?: boolean }) {
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-[0.3em] text-[#c7b39c]">{label}</div>
+      <div className={`mt-2 text-lg ${subtle ? 'text-[#dfd6ca]' : 'text-white'}`}>{value}</div>
+    </div>
+  )
+}
+
+function Setting({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-forge-steel/20 py-3 last:border-b-0">
+      <span className="text-sm text-forge-night/70">{label}</span>
+      <span className="max-w-[16rem] text-right text-sm font-medium text-forge-night">{value}</span>
+    </div>
+  )
+}
