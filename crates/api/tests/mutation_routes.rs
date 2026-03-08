@@ -434,3 +434,54 @@ async fn delete_project_moves_tasks_to_inbox_and_unassigns_events() {
     assert_eq!(refreshed_task.project_id, None);
     assert_eq!(refreshed_event.project_id, None);
 }
+
+#[tokio::test]
+async fn patch_event_rejects_invalid_timezone_without_persisting() {
+    let service = service().await;
+    let event = service
+        .create_event(CreateEventRequest {
+            title: "Stable block".to_string(),
+            description: String::new(),
+            project_id: None,
+            linked_task_id: None,
+            start_at: "2026-03-10T09:00:00Z".to_string(),
+            end_at: "2026-03-10T10:00:00Z".to_string(),
+            timezone: "UTC".to_string(),
+            event_type: EventType::Research,
+            rrule: Some("FREQ=DAILY;COUNT=2".to_string()),
+            recurrence_exceptions: vec![],
+            notes: String::new(),
+        })
+        .await
+        .expect("event");
+
+    let app = api::router(service.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/events/{}", event.id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "timezone": "Mars/Olympus"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload: serde_json::Value = json(response).await;
+    let error = payload
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .expect("error message");
+    assert!(error.contains("invalid timezone"));
+
+    let refreshed = service.get_event(event.id).await.expect("event after failed patch");
+    assert_eq!(refreshed.timezone, "UTC");
+    assert_eq!(refreshed.rrule.as_deref(), Some("FREQ=DAILY;COUNT=2"));
+}
