@@ -4,6 +4,23 @@ Forge is a local-first work operating system for technical builders managing mul
 
 Forge is not a generic todo list and not just a calendar. The product is built around one rule: the local `forged` daemon is the only writer to SQLite. The CLI and UI both mutate state through the daemon API.
 
+## Install Forge
+
+Forge is currently packaged for Windows first.
+
+Download desktop releases from:
+
+- [Forge Releases](https://github.com/Kasuletrevor/forge/releases)
+
+Published Windows assets:
+
+- `forge-v<version>-windows-x64-setup.exe`
+- `forge-v<version>-windows-x64-portable.zip`
+
+The installer is the normal path. The portable zip is for manual distribution and debugging.
+
+Current Windows releases are unsigned, so SmartScreen may warn on first launch.
+
 ## Current Shape
 
 Forge currently supports:
@@ -101,6 +118,17 @@ npm install
 npm run dev
 ```
 
+### Build a Windows desktop release locally
+
+```powershell
+npm ci --prefix frontend
+npm ci --prefix apps/desktop
+npm run verify:version --prefix apps/desktop
+npm run build:release --prefix apps/desktop
+```
+
+Release assets are written to `apps/desktop/dist/release`.
+
 ## Development Commands
 
 Backend checks:
@@ -177,6 +205,8 @@ Forge is intended to feel like a fast operational console rather than a generic 
 - [SPEC.md](SPEC.md)
 - [PRD.md](PRD.md)
 - [stack.md](stack.md)
+- [docs/installing.md](docs/installing.md)
+- [docs/releasing.md](docs/releasing.md)
 
 ## Next Phase
 
