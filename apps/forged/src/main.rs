@@ -2,7 +2,6 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     net::{Ipv4Addr, SocketAddr},
-    path::Path,
 };
 
 use anyhow::{Context, Result};
@@ -186,8 +185,10 @@ mod tests {
 
     #[test]
     fn forge_paths_include_log_file() {
-        let paths = ForgePaths::from_root(Path::new("C:\\temp\\forge").to_path_buf());
-        assert!(paths.daemon_log.ends_with(Path::new("logs").join("forged.log")));
+        let paths = ForgePaths::from_root(std::path::Path::new("C:\\temp\\forge").to_path_buf());
+        assert!(paths
+            .daemon_log
+            .ends_with(std::path::Path::new("logs").join("forged.log")));
         assert_eq!(paths.database_url(), "sqlite://C:/temp/forge/forge.db");
     }
 }
