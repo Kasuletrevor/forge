@@ -3,13 +3,17 @@
 use std::{
     env,
     fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     process::{Child, ExitStatus, Command, Stdio},
     time::Duration,
 };
 
+use tauri::AppHandle;
+use tauri_plugin_shell::{process::CommandEvent, ShellExt};
+
 #[tauri::command]
-async fn ensure_daemon() -> Result<String, String> {
+async fn ensure_daemon(app: AppHandle) -> Result<String, String> {
     let paths = domain::ForgePaths::discover().map_err(|error| error.message)?;
     let base_url = paths.api_base_url(domain::DEFAULT_API_HOST, domain::DEFAULT_API_PORT);
     let health_url = paths.health_url(domain::DEFAULT_API_HOST, domain::DEFAULT_API_PORT);
@@ -17,7 +21,7 @@ async fn ensure_daemon() -> Result<String, String> {
         return Ok(base_url);
     }
 
-    let mut child = spawn_forged(&paths).map_err(|error| {
+    let mut process = spawn_forged(&app, &paths).map_err(|error| {
         format!(
             "failed to start Forge daemon: {error}. Inspect {} and {}",
             paths.daemon_log.display(),
@@ -30,7 +34,7 @@ async fn ensure_daemon() -> Result<String, String> {
             return Ok(base_url);
         }
         if exit_status.is_none() {
-            exit_status = child.try_wait().ok().flatten();
+            exit_status = process.try_wait();
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -52,7 +56,48 @@ async fn daemon_ready(health_url: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn spawn_forged(paths: &domain::ForgePaths) -> anyhow::Result<Child> {
+enum DaemonProcess {
+    Sidecar,
+    Child(Child),
+}
+
+impl DaemonProcess {
+    fn try_wait(&mut self) -> Option<ExitStatus> {
+        match self {
+            Self::Sidecar => None,
+            Self::Child(child) => child.try_wait().ok().flatten(),
+        }
+    }
+}
+
+fn spawn_forged(app: &AppHandle, paths: &domain::ForgePaths) -> anyhow::Result<DaemonProcess> {
+    if let Ok(()) = spawn_bundled_sidecar(app, paths) {
+        return Ok(DaemonProcess::Sidecar);
+    }
+
+    spawn_local_forged(paths).map(DaemonProcess::Child)
+}
+
+fn spawn_bundled_sidecar(app: &AppHandle, paths: &domain::ForgePaths) -> anyhow::Result<()> {
+    let sidecar = app.shell().sidecar("forged")?;
+    let (mut rx, _child) = sidecar.spawn()?;
+    let log_path = paths.daemon_log.clone();
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Err(error) = write_command_event(&log_path, &event) {
+                let _ = append_log_line(
+                    &log_path,
+                    &format!("failed to capture Forge sidecar output: {error}"),
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn spawn_local_forged(paths: &domain::ForgePaths) -> anyhow::Result<Child> {
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -87,6 +132,33 @@ fn spawn_forged(paths: &domain::ForgePaths) -> anyhow::Result<Child> {
         .map_err(Into::into)
 }
 
+fn write_command_event(log_path: &Path, event: &CommandEvent) -> std::io::Result<()> {
+    match event {
+        CommandEvent::Stdout(line) => append_log_bytes(log_path, line),
+        CommandEvent::Stderr(line) => append_log_bytes(log_path, line),
+        CommandEvent::Error(line) => append_log_line(log_path, line),
+        CommandEvent::Terminated(payload) => append_log_line(
+            log_path,
+            &format!("Forge sidecar terminated with code {:?}", payload.code),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn append_log_bytes(log_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(log_path)?;
+    file.write_all(bytes)?;
+    if !bytes.ends_with(b"\n") {
+        file.write_all(b"\n")?;
+    }
+    file.flush()
+}
+
+fn append_log_line(log_path: &Path, line: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(log_path)?;
+    writeln!(file, "{line}")
+}
+
 fn format_startup_failure(
     paths: &domain::ForgePaths,
     health_url: &str,
@@ -105,6 +177,7 @@ fn format_startup_failure(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![ensure_daemon])
         .run(tauri::generate_context!())
         .expect("failed to run Forge desktop");

@@ -7,7 +7,7 @@
     "beforeDevCommand": "npm run dev --prefix ../../frontend",
     "beforeBuildCommand": "npm run build --prefix ../../frontend",
     "devUrl": "http://127.0.0.1:5173",
-    "frontendDist": "../../frontend/dist"
+    "frontendDist": "../../../frontend/dist"
   },
   "app": {
     "windows": [
@@ -23,6 +23,13 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/forged"],
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": false
+      }
+    }
   }
 }

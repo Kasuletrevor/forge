@@ -10,6 +10,7 @@ dirs.workspace = true
 domain = { path = "../../../crates/domain" }
 reqwest.workspace = true
 tauri.workspace = true
+tauri-plugin-shell = "2.3.1"
 tokio.workspace = true
 tracing.workspace = true
 

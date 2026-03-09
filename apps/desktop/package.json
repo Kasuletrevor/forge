@@ -4,8 +4,10 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "dev": "tauri dev -c src-tauri/tauri.conf.json",
+    "build": "node ./scripts/stage-sidecar.mjs && tauri build -c src-tauri/tauri.conf.json",
+    "build:release": "node ./scripts/stage-sidecar.mjs && tauri build -c src-tauri/tauri.conf.json && node ./scripts/package-portable.mjs",
+    "verify:version": "node ./scripts/verify-version-sync.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.0"
