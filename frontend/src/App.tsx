@@ -48,6 +48,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from './components/ui/dialog'
+import { RecurrenceBuilder } from './components/recurrence-builder'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -62,6 +63,12 @@ import {
 } from './lib/event-validation'
 import { isTypingTarget, screenFromShortcut, type ShortcutScreen } from './lib/keyboard'
 import { invalidateForgeQueries } from './lib/query'
+import {
+  buildRRule,
+  createDefaultRecurrenceState,
+  recurrenceStateFromRule,
+  type RecurrenceState,
+} from './lib/recurrence'
 import { buildTaskLanes } from './lib/task-board'
 import type {
   CreateEventRequest,
@@ -251,9 +258,13 @@ export default function App() {
     recurrence_exceptions: [],
     notes: '',
   })
+  const [eventFormRecurrence, setEventFormRecurrence] = useState<RecurrenceState>(() =>
+    createDefaultRecurrenceState(new Date().toISOString()),
+  )
   const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null)
   const [taskEditor, setTaskEditor] = useState<TaskEditorState | null>(null)
   const [eventEditor, setEventEditor] = useState<EventEditorState | null>(null)
+  const [eventEditorRecurrence, setEventEditorRecurrence] = useState<RecurrenceState | null>(null)
   const [deleteIntent, setDeleteIntent] = useState<DeleteIntent | null>(null)
   const [inlineProjectEdit, setInlineProjectEdit] = useState<{ id: number | null; name: string }>({
     id: null,
@@ -449,7 +460,23 @@ export default function App() {
 
   const createEvent = useMutation({
     mutationFn: (payload: CreateEventRequest) => forgeApi.createEvent(apiBaseUrl, payload),
-    onSuccess: invalidate,
+    onSuccess: async () => {
+      setEventForm({
+        title: '',
+        description: '',
+        project_id: null,
+        linked_task_id: null,
+        start_at: new Date().toISOString(),
+        end_at: new Date(Date.now() + 1000 * 60 * 60 * 2).toISOString(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+        event_type: 'implementation',
+        rrule: null,
+        recurrence_exceptions: [],
+        notes: '',
+      })
+      setEventFormRecurrence(createDefaultRecurrenceState(new Date().toISOString()))
+      await invalidate()
+    },
     onError: (error) => notifyError('Failed to create event', error),
   })
 
@@ -458,6 +485,7 @@ export default function App() {
       forgeApi.updateEvent(apiBaseUrl, id, payload),
     onSuccess: async () => {
       setEventEditor(null)
+      setEventEditorRecurrence(null)
       restoreShellFocus()
       await invalidate()
     },
@@ -468,6 +496,7 @@ export default function App() {
     mutationFn: (id: number) => forgeApi.deleteEvent(apiBaseUrl, id),
     onSuccess: async () => {
       setEventEditor(null)
+      setEventEditorRecurrence(null)
       restoreShellFocus()
       await invalidate()
     },
@@ -623,6 +652,7 @@ export default function App() {
       rrule: event.rrule ?? '',
       notes: event.notes,
     })
+    setEventEditorRecurrence(recurrenceStateFromRule(event.rrule, event.start_at))
   }
 
   function handleTaskLaneDragStart(
@@ -754,18 +784,18 @@ export default function App() {
   }
 
   function saveEventEditor() {
-    if (!eventEditor) {
+    if (!eventEditor || !eventEditorRecurrence) {
       return
     }
     const payloadStart = datetimeLocalToIso(eventEditor.start_at)
     const payloadEnd = datetimeLocalToIso(eventEditor.end_at)
-    const payloadRRule = normalizeRRule(eventEditor.rrule)
+    const payloadRRule = normalizeRRule(buildRRule(eventEditorRecurrence, payloadStart ?? eventEditor.start_at))
     const draftError = validateEventMutationDraft({
       title: eventEditor.title,
       startAt: payloadStart,
       endAt: payloadEnd,
       timezone: eventEditor.timezone,
-      rrule: eventEditor.rrule,
+      rrule: payloadRRule,
     })
     if (draftError) {
       toast({
@@ -792,13 +822,13 @@ export default function App() {
   }
 
   function saveEventForm() {
-    const payloadRRule = normalizeRRule(eventForm.rrule)
+    const payloadRRule = normalizeRRule(buildRRule(eventFormRecurrence, eventForm.start_at))
     const draftError = validateEventMutationDraft({
       title: eventForm.title,
       startAt: eventForm.start_at,
       endAt: eventForm.end_at,
       timezone: eventForm.timezone,
-      rrule: eventForm.rrule,
+      rrule: payloadRRule,
     })
     if (draftError) {
       toast({
@@ -1446,10 +1476,14 @@ export default function App() {
                     <Field label="End" value={isoToDatetimeLocal(eventForm.end_at)} onChange={(value) => setEventForm({ ...eventForm, end_at: datetimeLocalToIso(value) ?? eventForm.end_at })} type="datetime-local" />
                     <Field label="Timezone" value={eventForm.timezone} onChange={(value) => setEventForm({ ...eventForm, timezone: value })} placeholder="UTC" />
                     <Select label="Event Type" value={eventForm.event_type} onChange={(value) => setEventForm({ ...eventForm, event_type: value as EventType })} options={eventTypes.map((eventType) => ({ value: eventType, label: eventType }))} />
-                    <Field label="RRULE" value={eventForm.rrule ?? ''} onChange={(value) => setEventForm({ ...eventForm, rrule: value || null })} placeholder="FREQ=WEEKLY;BYDAY=MO,WE" />
-                    <p className="mt-2 text-xs uppercase tracking-[0.18em] text-forge-steel">
-                      Examples: FREQ=DAILY;COUNT=5 or FREQ=WEEKLY;BYDAY=MO,WE
-                    </p>
+                    <RecurrenceBuilder
+                      startValue={eventForm.start_at}
+                      endValue={eventForm.end_at}
+                      timeFormat="iso"
+                      value={eventFormRecurrence}
+                      onChange={setEventFormRecurrence}
+                      onEndValueChange={(value) => setEventForm({ ...eventForm, end_at: value })}
+                    />
                     <button className="forge-button mt-4" onClick={saveEventForm} type="button">Create event</button>
                   </Section>
                 </div>
@@ -1526,7 +1560,7 @@ export default function App() {
           <DialogHeader>
             <DialogTitle>Edit Event</DialogTitle>
             <DialogDescription>
-              {eventEditor?.rrule
+              {eventEditorRecurrence && buildRRule(eventEditorRecurrence, datetimeLocalToIso(eventEditor?.start_at ?? '') ?? eventEditor?.start_at)
                 ? 'Recurring edits shift the whole series through the daemon API.'
                 : 'Calendar changes always patch the daemon API.'}{' '}
               {eventEditor?.linked_task_id
@@ -1543,10 +1577,16 @@ export default function App() {
             <Field label="End" value={eventEditor.end_at} onChange={(value) => setEventEditor({ ...eventEditor, end_at: value })} type="datetime-local" />
             <Field label="Timezone" value={eventEditor.timezone} onChange={(value) => setEventEditor({ ...eventEditor, timezone: value })} />
             <Select label="Event Type" value={eventEditor.event_type} onChange={(value) => setEventEditor({ ...eventEditor, event_type: value as EventType })} options={eventTypes.map((eventType) => ({ value: eventType, label: eventType }))} />
-            <Field label="RRULE" value={eventEditor.rrule} onChange={(value) => setEventEditor({ ...eventEditor, rrule: value })} placeholder="Leave empty for one-off" />
-            <p className="mt-2 text-xs uppercase tracking-[0.18em] text-forge-steel">
-              RRULE examples: FREQ=DAILY;COUNT=5 or FREQ=WEEKLY;BYDAY=MO,WE
-            </p>
+            {eventEditorRecurrence ? (
+              <RecurrenceBuilder
+                startValue={eventEditor.start_at}
+                endValue={eventEditor.end_at}
+                timeFormat="local"
+                value={eventEditorRecurrence}
+                onChange={setEventEditorRecurrence}
+                onEndValueChange={(value) => setEventEditor({ ...eventEditor, end_at: value })}
+              />
+            ) : null}
             <Field label="Notes" value={eventEditor.notes} onChange={(value) => setEventEditor({ ...eventEditor, notes: value })} multiline />
             <div className="mt-4 flex gap-3">
               <button className="forge-button" onClick={saveEventEditor} type="button">Save event</button>
