@@ -214,9 +214,13 @@ jobs:
           fi
 
           args=(
-            release create "${release_tag}"
-            --repo "${GH_REPO}"
-            --title "Forge ${version}"
+            release
+            create
+            "${release_tag}"
+            --repo
+            "${GH_REPO}"
+            --title
+            "Forge ${version}"
             --generate-notes
           )
 
