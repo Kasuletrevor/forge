@@ -1,0 +1,196 @@
+name: Desktop Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  FORGE_SIDECAR_TARGET: x86_64-pc-windows-msvc
+
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tag-check:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag matches Forge version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./apps/desktop/package.json').version")"
+          tag="${GITHUB_REF_NAME#v}"
+
+          if [[ "${tag}" != "${version}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Forge version ${version}"
+            exit 1
+          fi
+
+  build-windows:
+    runs-on: windows-latest
+    needs: tag-check
+    if: ${{ always() && (needs.tag-check.result == 'success' || needs.tag-check.result == 'skipped') }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Verify desktop version sync
+        run: npm run verify:version --prefix apps/desktop
+
+      - name: Determine release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(node -p "require('./apps/desktop/package.json').version")"
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build desktop release assets
+        run: npm run build:release --prefix apps/desktop
+        env:
+          FORGE_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Smoke packaged desktop startup
+        shell: powershell
+        run: |
+          $healthUrl = "http://127.0.0.1:37241/health"
+          $desktopCandidates = @(
+            (Join-Path $PWD "target\release\Forge.exe"),
+            (Join-Path $PWD "target\release\forge-desktop.exe"),
+            (Join-Path $PWD "apps\desktop\src-tauri\target\release\Forge.exe"),
+            (Join-Path $PWD "apps\desktop\src-tauri\target\release\forge-desktop.exe")
+          )
+          $desktopExe = $desktopCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $desktopExe) {
+            throw "Unable to locate Forge desktop executable for smoke test."
+          }
+
+          Get-Process forge-desktop,Forge,forged -ErrorAction SilentlyContinue | Stop-Process -Force
+
+          $desktop = Start-Process -FilePath $desktopExe -PassThru
+          $ready = $false
+
+          try {
+            $deadline = (Get-Date).AddSeconds(45)
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Milliseconds 500
+              try {
+                $response = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
+                if ($response.status -eq "ok") {
+                  $ready = $true
+                  break
+                }
+              } catch {
+              }
+            }
+
+            if (-not $ready) {
+              throw "Forge desktop smoke test did not reach a healthy daemon."
+            }
+          } finally {
+            if ($desktop -and -not $desktop.HasExited) {
+              Stop-Process -Id $desktop.Id -Force
+            }
+            Get-Process forged -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+
+      - name: Generate checksums
+        shell: powershell
+        run: |
+          $releaseDir = Join-Path $PWD "apps\desktop\dist\release"
+          $lines = Get-ChildItem $releaseDir -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          Set-Content -Path (Join-Path $releaseDir "SHA256SUMS.txt") -Value $lines
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: forge-desktop-windows-x64
+          path: apps/desktop/dist/release/*
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: forge-desktop-windows-x64
+          path: dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          prerelease=false
+          if [[ "${version}" == *-* ]]; then
+            prerelease=true
+          fi
+
+          mapfile -t assets < <(find dist -maxdepth 1 -type f | sort)
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release assets found in dist/"
+            exit 1
+          fi
+
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+            exit 0
+          fi
+
+          args=(
+            release create "${GITHUB_REF_NAME}"
+            --title "Forge ${version}"
+            --generate-notes
+          )
+
+          if [[ "${prerelease}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+
+          gh "${args[@]}" "${assets[@]}"
