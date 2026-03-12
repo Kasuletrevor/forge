@@ -49,6 +49,8 @@ import {
   DialogTitle,
 } from './components/ui/dialog'
 import { RecurrenceBuilder } from './components/recurrence-builder'
+import { ScheduleWidget } from './components/schedule-widget'
+import { ColorPicker } from './components/color-picker'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -262,7 +264,9 @@ export default function App() {
     createDefaultRecurrenceState(new Date().toISOString()),
   )
   const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null)
+  const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
   const [taskEditor, setTaskEditor] = useState<TaskEditorState | null>(null)
+  const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
   const [eventEditor, setEventEditor] = useState<EventEditorState | null>(null)
   const [eventEditorRecurrence, setEventEditorRecurrence] = useState<RecurrenceState | null>(null)
   const [deleteIntent, setDeleteIntent] = useState<DeleteIntent | null>(null)
@@ -389,6 +393,7 @@ export default function App() {
     mutationFn: (payload: CreateProjectRequest) => forgeApi.createProject(apiBaseUrl, payload),
     onSuccess: async () => {
       setProjectForm({ ...projectForm, name: '', description: '' })
+      setIsCreateProjectOpen(false)
       await invalidate()
     },
     onError: (error) => notifyError('Failed to create project', error),
@@ -419,6 +424,7 @@ export default function App() {
     mutationFn: (payload: CreateTaskRequest) => forgeApi.createTask(apiBaseUrl, payload),
     onSuccess: async () => {
       setTaskForm({ ...taskForm, title: '', description: '', due_at: null, notes: '' })
+      setIsCreateTaskOpen(false)
       await invalidate()
     },
     onError: (error) => notifyError('Failed to create task', error),
@@ -1040,7 +1046,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#ece4d8] text-forge-ink">
       <div className="mx-auto flex min-h-screen max-w-[1600px] gap-6 p-4 md:p-6">
-        <aside className="w-full max-w-[290px] rounded-[30px] border border-forge-steel/35 bg-forge-night p-5 text-forge-paper shadow-panel">
+        <aside className="w-full shrink-0 max-w-[290px] rounded-[30px] border border-forge-steel/35 bg-forge-night p-5 text-forge-paper shadow-panel">
           <p className="text-xs uppercase tracking-[0.35em] text-forge-steel">Forge</p>
           <h1 className="mt-2 font-display text-4xl">Work OS</h1>
           <p className="mt-3 text-sm text-white/70">
@@ -1074,7 +1080,7 @@ export default function App() {
           </div>
         </aside>
 
-        <main className="flex-1">
+        <main className="flex-1 min-w-0 flex flex-col">
           <header className="rounded-[34px] border border-forge-steel/35 bg-[radial-gradient(circle_at_top_left,_rgba(217,107,43,0.24),_transparent_42%),linear-gradient(135deg,#201b17,#332b24)] p-6 text-forge-paper shadow-panel">
             <p className="text-xs uppercase tracking-[0.35em] text-[#c7b39c]">Operator View</p>
             <h2 className="mt-3 max-w-3xl font-display text-4xl leading-tight md:text-5xl">
@@ -1132,19 +1138,13 @@ export default function App() {
                     )}
                   </Section>
                   <div className="grid gap-5">
-                    <Section title="Today on the Clock" eyebrow="Calendar">
-                      {today.today_events.length === 0 ? (
-                        <Empty label="Nothing scheduled today." />
-                      ) : (
-                        today.today_events.map((event) => (
-                          <EventOccurrenceCard
-                            key={`${event.event_id}:${event.occurrence_start}`}
-                            event={event}
-                            project={event.project_id ? projectMap.get(event.project_id) : undefined}
-                          />
-                        ))
-                      )}
-                    </Section>
+                    <ScheduleWidget 
+                      events={calendarEvents.map(e => ({ 
+                        id: String(e.event_id), 
+                        title: e.title, 
+                        date: e.occurrence_start 
+                      }))} 
+                    />
                     <Section title="Overdue" eyebrow="Recovery">
                       {today.overdue_tasks.length === 0 ? (
                         <Empty label="No overdue tasks." compact />
@@ -1167,9 +1167,12 @@ export default function App() {
               )}
 
               {screen === 'projects' && (
-                <div className="grid gap-5 xl:grid-cols-[1.2fr,0.8fr]">
+                <div className="grid gap-5">
                   <Section title="Active Surfaces" eyebrow="Projects">
-                    <div className="grid gap-4 md:grid-cols-2">
+                    <div className="flex justify-end mb-4">
+                      <button className="forge-button bg-forge-night text-white border-none" onClick={() => setIsCreateProjectOpen(true)} type="button">New Project</button>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
                       {projectSummaries.map((summary) => (
                         <article key={summary.project.id} className="rounded-[26px] border border-forge-steel/20 bg-[#f9f6f0] p-5">
                           <div className="flex items-center justify-between gap-3">
@@ -1221,53 +1224,16 @@ export default function App() {
                       ))}
                     </div>
                   </Section>
-                  <Section title={projectEditor ? 'Edit Project' : 'Add Project'} eyebrow={projectEditor ? 'Metadata' : 'New'}>
-                    {projectEditor ? (
-                      <>
-                        <Field autoFocus label="Name" value={projectEditor.name} onChange={(value) => setProjectEditor({ ...projectEditor, name: value })} />
-                        <Field label="Description" value={projectEditor.description} onChange={(value) => setProjectEditor({ ...projectEditor, description: value })} multiline />
-                        <Select label="Status" value={projectEditor.status} onChange={(value) => setProjectEditor({ ...projectEditor, status: value as ProjectStatus })} options={projectStatuses.map((status) => ({ value: status, label: status }))} />
-                        <Field label="Tags" value={projectEditor.tags} onChange={(value) => setProjectEditor({ ...projectEditor, tags: value })} placeholder="infra, backend" />
-                        <Field label="Color" value={projectEditor.color} onChange={(value) => setProjectEditor({ ...projectEditor, color: value })} type="color" />
-                            <div className="mt-4 flex gap-3">
-                              <button className="forge-button" onClick={saveProjectEditor} type="button">Save project</button>
-                              <button className="forge-button forge-button-muted" onClick={() => { setProjectEditor(null); restoreShellFocus() }} type="button">Cancel</button>
-                            </div>
-                            <div className="mt-8 rounded-[24px] border border-[#8f3424]/18 bg-[#fff5f2] p-4">
-                              <div className="text-[11px] uppercase tracking-[0.24em] text-[#8f3424]">Danger Zone</div>
-                              <p className="mt-3 text-sm text-forge-night/72">
-                                Delete the project and move its tasks to Inbox.
-                              </p>
-                              <button
-                                className="forge-button forge-button-danger mt-4"
-                                onClick={() => {
-                                  const project = projectMap.get(projectEditor.id)
-                                  if (project) {
-                                    requestDeleteProject(project)
-                                  }
-                                }}
-                                type="button"
-                              >
-                                Delete project
-                              </button>
-                            </div>
-                          </>
-                        ) : (
-                      <>
-                        <Field label="Name" value={projectForm.name} onChange={(value) => setProjectForm({ ...projectForm, name: value })} />
-                        <Field label="Description" value={projectForm.description} onChange={(value) => setProjectForm({ ...projectForm, description: value })} multiline />
-                        <Field label="Color" value={projectForm.color} onChange={(value) => setProjectForm({ ...projectForm, color: value })} type="color" />
-                        <button className="forge-button mt-4" onClick={() => createProject.mutate(projectForm)} type="button">Create project</button>
-                      </>
-                    )}
-                  </Section>
                 </div>
               )}
 
               {screen === 'tasks' && (
-                <div className="grid gap-5 xl:grid-cols-[1.35fr,0.75fr]">
+                <div className="grid gap-5">
                   <div className="grid gap-5">
                     <Section title="Reassign by Drag" eyebrow="Board">
+                      <div className="flex justify-end mb-4">
+                        <button className="forge-button bg-forge-night text-white border-none" onClick={() => setIsCreateTaskOpen(true)} type="button">New Task</button>
+                      </div>
                       <div className="flex items-center justify-between gap-3">
                         <p className="max-w-2xl text-sm text-forge-night/72">
                           Drag operational tasks between Inbox and project lanes. The board follows the active task filter, and lane changes only render after the daemon API confirms the mutation.
@@ -1407,22 +1373,6 @@ export default function App() {
                           ))
                         )}
                       </div>
-                    </Section>
-                  </div>
-
-                  <div className="grid gap-5">
-                    <Section title="Quick Add" eyebrow="Capture">
-                      <Field label="Title" value={taskForm.title} onChange={(value) => setTaskForm({ ...taskForm, title: value })} />
-                      <Field label="Description" value={taskForm.description} onChange={(value) => setTaskForm({ ...taskForm, description: value })} multiline />
-                      <Select label="Project" value={String(taskForm.project_id ?? 'inbox')} onChange={(value) => setTaskForm({ ...taskForm, project_id: value === 'inbox' ? null : Number(value) })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
-                      <Select label="Priority" value={taskForm.priority} onChange={(value) => setTaskForm({ ...taskForm, priority: value as TaskPriority })} options={taskPriorities.map((priority) => ({ value: priority, label: priority }))} />
-                      <Field label="Due" value={isoToDatetimeLocal(taskForm.due_at)} onChange={(value) => setTaskForm({ ...taskForm, due_at: datetimeLocalToIso(value) })} type="datetime-local" />
-                      <button className="forge-button mt-4" onClick={() => createTask.mutate(taskForm)} type="button">Create task</button>
-                    </Section>
-                    <Section title="Drag Notes" eyebrow="Behavior">
-                      <Setting label="Inbox" value="Dropping into Inbox sets project_id to null" />
-                      <Setting label="Mutations" value="Lane changes patch the daemon API before UI refresh" />
-                      <Setting label="Task data" value="Scheduling, notes, and estimates remain intact during reassignment" />
                     </Section>
                   </div>
                 </div>
@@ -1609,6 +1559,78 @@ export default function App() {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={isCreateProjectOpen} onOpenChange={setIsCreateProjectOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create Project</DialogTitle>
+            <DialogDescription>Add a new project surface.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Field label="Name" value={projectForm.name} onChange={(value) => setProjectForm({ ...projectForm, name: value })} autoFocus />
+            <Field label="Description" value={projectForm.description} onChange={(value) => setProjectForm({ ...projectForm, description: value })} multiline />
+            <ColorPicker label="Color" value={projectForm.color} onChange={(value) => setProjectForm({ ...projectForm, color: value })} />
+            <div className="flex justify-end gap-3 mt-4">
+              <button className="forge-button forge-button-muted" onClick={() => setIsCreateProjectOpen(false)} type="button">Cancel</button>
+              <button className="forge-button" onClick={() => createProject.mutate(projectForm)} type="button">Create project</button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={projectEditor !== null} onOpenChange={(open) => { if (!open) { setProjectEditor(null); restoreShellFocus() } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Project</DialogTitle>
+            <DialogDescription>Modify project metadata.</DialogDescription>
+          </DialogHeader>
+          {projectEditor ? (
+            <div className="space-y-4">
+              <Field autoFocus label="Name" value={projectEditor.name} onChange={(value) => setProjectEditor({ ...projectEditor, name: value })} />
+              <Field label="Description" value={projectEditor.description} onChange={(value) => setProjectEditor({ ...projectEditor, description: value })} multiline />
+              <Select label="Status" value={projectEditor.status} onChange={(value) => setProjectEditor({ ...projectEditor, status: value as ProjectStatus })} options={projectStatuses.map((status) => ({ value: status, label: status }))} />
+              <Field label="Tags" value={projectEditor.tags} onChange={(value) => setProjectEditor({ ...projectEditor, tags: value })} placeholder="infra, backend" />
+              <ColorPicker label="Color" value={projectEditor.color} onChange={(value) => setProjectEditor({ ...projectEditor, color: value })} />
+              <div className="flex justify-end gap-3 mt-4">
+                <button className="forge-button forge-button-muted" onClick={() => { setProjectEditor(null); restoreShellFocus() }} type="button">Cancel</button>
+                <button className="forge-button" onClick={saveProjectEditor} type="button">Save project</button>
+                <button
+                  className="forge-button forge-button-danger ml-auto"
+                  onClick={() => {
+                    const project = projectMap.get(projectEditor.id)
+                    if (project) {
+                      requestDeleteProject(project)
+                    }
+                  }}
+                  type="button"
+                >
+                  Delete project
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isCreateTaskOpen} onOpenChange={setIsCreateTaskOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Quick Add Task</DialogTitle>
+            <DialogDescription>Create a new task.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Field label="Title" value={taskForm.title} onChange={(value) => setTaskForm({ ...taskForm, title: value })} autoFocus />
+            <Field label="Description" value={taskForm.description} onChange={(value) => setTaskForm({ ...taskForm, description: value })} multiline />
+            <Select label="Project" value={String(taskForm.project_id ?? 'inbox')} onChange={(value) => setTaskForm({ ...taskForm, project_id: value === 'inbox' ? null : Number(value) })} options={[{ value: 'inbox', label: 'Inbox' }, ...projectSummaries.map((summary) => ({ value: String(summary.project.id), label: summary.project.name }))]} />
+            <Select label="Priority" value={taskForm.priority} onChange={(value) => setTaskForm({ ...taskForm, priority: value as TaskPriority })} options={taskPriorities.map((priority) => ({ value: priority, label: priority }))} />
+            <Field label="Due" value={isoToDatetimeLocal(taskForm.due_at)} onChange={(value) => setTaskForm({ ...taskForm, due_at: datetimeLocalToIso(value) })} type="datetime-local" />
+            <div className="flex justify-end gap-3 mt-4">
+              <button className="forge-button forge-button-muted" onClick={() => setIsCreateTaskOpen(false)} type="button">Cancel</button>
+              <button className="forge-button" onClick={() => createTask.mutate(taskForm)} type="button">Create task</button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <AlertDialog open={deleteIntent !== null} onOpenChange={(open) => { if (!open) { setDeleteIntent(null); restoreShellFocus() } }}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1792,19 +1814,6 @@ function TaskCard({
           </DropdownMenu>
         ) : null}
       </div>
-    </div>
-  )
-}
-
-function EventOccurrenceCard({ event, project }: { event: { event_type: EventType; title: string; occurrence_start: string }; project?: Project }) {
-  return (
-    <div className="rounded-[24px] border border-forge-steel/20 bg-[#fbf7f1] p-4">
-      <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-forge-steel">
-        <span>{event.event_type.replace('_', ' ')}</span>
-        <span>{project?.name ?? 'Unassigned'}</span>
-      </div>
-      <div className="mt-2 text-base font-medium">{event.title}</div>
-      <div className="mt-2 text-sm text-forge-night/70">{fmt(event.occurrence_start)}</div>
     </div>
   )
 }
