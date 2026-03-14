@@ -21,6 +21,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   FORGE_SIDECAR_TARGET: x86_64-pc-windows-msvc
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
   group: release-desktop-${{ github.ref }}
@@ -35,7 +36,7 @@ jobs:
       should_publish: ${{ steps.meta.outputs.should_publish }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve release metadata
         id: meta
@@ -83,13 +84,13 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -249,7 +250,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v4
         with:
