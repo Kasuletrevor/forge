@@ -186,8 +186,8 @@ jobs:
             throw "Expected forge today to succeed after CLI install, got: $today"
           }
 
-          $doctor = & forge doctor
-          if ($doctor -notmatch "^Forge Environment Check") {
+          $doctor = (& forge doctor) -join "`n"
+          if ($doctor -notmatch "(?m)^Forge Environment Check$") {
             throw "Expected forge doctor to succeed after CLI install, got: $doctor"
           }
 
@@ -217,8 +217,8 @@ jobs:
             throw "Expected forge --version after desktop install, got: $version"
           }
 
-          $doctor = & forge doctor
-          if ($doctor -notmatch "^Forge Environment Check") {
+          $doctor = (& forge doctor) -join "`n"
+          if ($doctor -notmatch "(?m)^Forge Environment Check$") {
             throw "Expected forge doctor after desktop install, got: $doctor"
           }
 
