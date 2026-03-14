@@ -48,6 +48,13 @@ The standalone CLI zip contains:
 
 Running `install-cli.ps1` installs the binaries into `%LOCALAPPDATA%\\Programs\\Forge\\bin` and adds that directory to the user `PATH`.
 
+At the end of the install, the script prints quick-start commands such as:
+
+- `forge --help`
+- `forge doctor`
+- `forge today`
+- `forge task add "Example task"`
+
 Running `uninstall-cli.ps1` removes the managed CLI install and removes the Forge `PATH` segment if present.
 
 ## Local Data Paths
@@ -86,5 +93,30 @@ PATH behavior:
 - the desktop installer and standalone CLI installer update the user `PATH`
 - a new terminal session may be required before `forge` resolves without an absolute path
 - uninstall removes the Forge-managed `PATH` segment if present
+
+## CLI Maintenance
+
+Supported managed-install commands:
+
+- `forge doctor`
+- `forge update`
+
+`forge doctor` reports:
+
+- current CLI location
+- whether the managed install root is on `PATH`
+- daemon reachability
+- local config, database, and log paths
+
+`forge update`:
+
+- checks the latest stable GitHub release
+- downloads the published Windows CLI zip
+- replaces `forge.exe` and `forged.exe` in `%LOCALAPPDATA%\\Programs\\Forge\\bin`
+
+Current limitation:
+
+- `forge update` updates the CLI and daemon only
+- desktop app updates remain installer-based in this phase
 
 If a release ever changes this behavior, document it in the release notes before publishing.
