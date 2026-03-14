@@ -877,10 +877,8 @@ fn normalize_path_for_compare(path: &Path) -> String {
 
 fn path_contains_segment(path_value: &str, segment: &Path) -> bool {
     let expected = normalize_path_for_compare(segment);
-    path_value
-        .split(';')
-        .filter(|value| !value.trim().is_empty())
-        .any(|value| normalize_path_for_compare(Path::new(value.trim())) == expected)
+    env::split_paths(path_value)
+        .any(|value| normalize_path_for_compare(&value) == expected)
 }
 
 fn is_managed_install_binary(current_exe: &Path, install_root: &Path) -> bool {
@@ -2165,13 +2163,17 @@ mod tests {
             Some("abc123")
         );
 
-        let managed_root = PathBuf::from("C:\\Users\\Trevor\\AppData\\Local\\Programs\\Forge\\bin");
+        let managed_root = PathBuf::from_iter(["forge-test", "bin"]);
+        let path_value = env::join_paths([PathBuf::from_iter(["system"]), managed_root.clone()])
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert!(path_contains_segment(
-            "C:\\Windows\\System32;C:\\Users\\Trevor\\AppData\\Local\\Programs\\Forge\\bin",
+            &path_value,
             &managed_root
         ));
         assert!(is_managed_install_binary(
-            Path::new("C:\\Users\\Trevor\\AppData\\Local\\Programs\\Forge\\bin\\forge.exe"),
+            &managed_root.join("forge.exe"),
             &managed_root
         ));
     }
