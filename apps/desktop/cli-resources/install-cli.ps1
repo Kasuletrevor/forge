@@ -1,5 +1,6 @@
 param(
-  [string]$SourceDir = $PSScriptRoot
+  [string]$SourceDir = $PSScriptRoot,
+  [switch]$Quiet
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,5 +111,15 @@ if (-not $alreadyPresent) {
 Set-ForgeUserPathSegments -Segments $currentSegments
 Publish-ForgeEnvironmentChange
 
-Write-Host "Installed Forge CLI to $installRoot"
-Write-Host "Restart the terminal if 'forge' is not yet available in the current session."
+if (-not $Quiet) {
+  Write-Host "Forge CLI installed."
+  Write-Host ""
+  Write-Host "Location: $installRoot"
+  Write-Host "Restart the terminal if 'forge' is not yet available in the current session."
+  Write-Host ""
+  Write-Host "Try:"
+  Write-Host "  forge --help"
+  Write-Host "  forge doctor"
+  Write-Host "  forge today"
+  Write-Host "  forge task add ""Example task"""
+}
