@@ -11,6 +11,11 @@ Install:
 Uninstall:
   powershell -ExecutionPolicy Bypass -File .\uninstall-cli.ps1
 
+Useful commands after install:
+  forge --help
+  forge doctor
+  forge update
+
 Installed location:
   %LOCALAPPDATA%\Programs\Forge\bin
 
