@@ -26,9 +26,12 @@
     "active": true,
     "targets": ["nsis"],
     "externalBin": ["binaries/forged"],
+    "resources": ["forge-cli"],
     "windows": {
       "nsis": {
-        "displayLanguageSelector": false
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "installerHooks": "./windows/installer-hooks.nsh"
       }
     }
   }

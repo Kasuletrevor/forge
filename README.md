@@ -8,7 +8,7 @@ Forge is not a generic todo list and not just a calendar. The product is built a
 
 Forge is currently packaged for Windows first.
 
-Download desktop releases from:
+Download releases from:
 
 - [Forge Releases](https://github.com/Kasuletrevor/forge/releases)
 
@@ -16,8 +16,13 @@ Published Windows assets:
 
 - `forge-v<version>-windows-x64-setup.exe`
 - `forge-v<version>-windows-x64-portable.zip`
+- `forge-v<version>-windows-x64-cli.zip`
 
-The installer is the normal path. The portable zip is for manual distribution and debugging.
+Install behavior:
+
+- `setup.exe` installs the desktop app and configures the global `forge` CLI
+- `portable.zip` is for manual desktop distribution and debugging and does not modify `PATH`
+- `cli.zip` installs just the CLI and daemon for terminal-first use
 
 Current Windows releases are unsigned, so SmartScreen may warn on first launch.
 
@@ -102,6 +107,17 @@ cargo run -p forge -- today
 
 The CLI will attempt to start the daemon automatically if it is not already available.
 
+### Global CLI install on Windows
+
+After installing Forge through the Windows setup executable or the standalone CLI zip installer script, `forge` is available from any new terminal session.
+
+Managed CLI install root:
+
+- `%LOCALAPPDATA%\\Programs\\Forge\\bin\\forge.exe`
+- `%LOCALAPPDATA%\\Programs\\Forge\\bin\\forged.exe`
+
+The installer adds `%LOCALAPPDATA%\\Programs\\Forge\\bin` to the user `PATH`.
+
 ### Run the frontend
 
 ```powershell
@@ -170,6 +186,8 @@ forge event add|list|edit|delete
 forge focus ...
 forge today
 ```
+
+The public command is `forge`. `forged` is installed as the local daemon binary and is started automatically by the CLI when needed.
 
 ### API
 

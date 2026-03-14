@@ -32,9 +32,16 @@ const appBinary = locateFirstExisting([
   resolve(repoRoot, 'apps', 'desktop', 'src-tauri', 'target', 'release', 'Forge.exe'),
   resolve(repoRoot, 'apps', 'desktop', 'src-tauri', 'target', 'release', 'forge-desktop.exe'),
 ])
+const cliBinary = locateFirstExisting([
+  resolve(repoRoot, 'target', target, 'release', 'forge.exe'),
+  resolve(repoRoot, 'target', 'release', 'forge.exe'),
+])
 const sidecar = locateFirstExisting([
   resolve(repoRoot, 'target', target, 'release', 'forged.exe'),
   resolve(repoRoot, 'apps', 'desktop', 'src-tauri', 'binaries', `forged-${target}.exe`),
+])
+const cliPackageSource = locateFirstExisting([
+  resolve(desktopRoot, 'src-tauri', 'forge-cli'),
 ])
 
 const normalizedInstaller = resolve(releaseDir, `forge-v${version}-${platformLabel}-setup.exe`)
@@ -60,9 +67,19 @@ writeFileSync(
 const portableArchive = resolve(releaseDir, `forge-v${version}-${platformLabel}-portable.zip`)
 compressArchive(portableRoot, portableArchive)
 
+const cliRoot = resolve(releaseDir, `forge-v${version}-${platformLabel}-cli`)
+mkdirSync(cliRoot, { recursive: true })
+copyDirectoryFiles(cliPackageSource, cliRoot)
+copyFileSync(cliBinary, resolve(cliRoot, 'forge.exe'))
+copyFileSync(sidecar, resolve(cliRoot, 'forged.exe'))
+
+const cliArchive = resolve(releaseDir, `forge-v${version}-${platformLabel}-cli.zip`)
+compressArchive(cliRoot, cliArchive)
+
 console.log(`prepared release assets in ${releaseDir}`)
 console.log(`installer: ${basename(normalizedInstaller)}`)
 console.log(`portable: ${basename(portableArchive)}`)
+console.log(`cli: ${basename(cliArchive)}`)
 
 function locateInstaller() {
   const bundleDirs = [
@@ -96,6 +113,21 @@ function locateFirstExisting(candidates) {
   }
 
   throw new Error(`failed to locate required build output. Tried:\n${candidates.join('\n')}`)
+}
+
+function copyDirectoryFiles(sourceDirectory, destinationDirectory) {
+  for (const entry of readdirSync(sourceDirectory, { withFileTypes: true })) {
+    const source = resolve(sourceDirectory, entry.name)
+    const destination = resolve(destinationDirectory, entry.name)
+
+    if (entry.isDirectory()) {
+      mkdirSync(destination, { recursive: true })
+      copyDirectoryFiles(source, destination)
+      continue
+    }
+
+    copyFileSync(source, destination)
+  }
 }
 
 function compressArchive(sourceDirectory, destinationArchive) {

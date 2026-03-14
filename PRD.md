@@ -609,6 +609,8 @@ forge focus clear
 * sensible defaults
 * scriptable behavior
 * machine-readable output option later
+* supported Windows installs make `forge` available globally through the user PATH
+* the CLI can be used without launching the desktop app
 
 ---
 
@@ -824,3 +826,7 @@ The purpose of Forge is to reduce fragmentation, lower cognitive load, improve p
 It exists because ordinary productivity tools do not fit a high-context, multi-project, execution-heavy technical life.
 
 ---
+
+
+
+
