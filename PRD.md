@@ -611,6 +611,8 @@ forge focus clear
 * machine-readable output option later
 * supported Windows installs make `forge` available globally through the user PATH
 * the CLI can be used without launching the desktop app
+* the CLI should provide a local `doctor` command for installation diagnostics
+* the CLI should provide a stable-channel self-update command for the managed Windows install
 
 ---
 
