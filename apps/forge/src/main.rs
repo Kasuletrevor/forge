@@ -1,6 +1,6 @@
 use std::{
     env,
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -17,8 +17,11 @@ use domain::{
     UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
     DEFAULT_API_PORT, default_project_color, parse_rfc3339,
 };
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::Client;
-use serde::Serialize;
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Parser)]
 #[command(name = "forge", about = "Forge CLI", version)]
@@ -30,6 +33,8 @@ struct ForgeCli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Today,
+    Update(UpdateArgs),
+    Doctor,
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
@@ -276,16 +281,72 @@ struct FocusSetArgs {
     task: Option<i64>,
 }
 
+#[derive(Debug, Args, Default)]
+struct UpdateArgs {
+    #[arg(long)]
+    check: bool,
+}
+
+const GITHUB_RELEASES_LATEST_URL: &str =
+    "https://api.github.com/repos/Kasuletrevor/forge/releases/latest";
+const CLI_CHECKSUM_ASSET_NAME: &str = "SHA256SUMS.txt";
+const MANAGED_INSTALL_RELATIVE_PATH: &str = "Programs\\Forge\\bin";
+const WINDOWS_PLATFORM_LABEL: &str = "windows-x64";
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Debug, Clone)]
+struct UpdateTarget {
+    latest_version: Version,
+    release_url: String,
+    cli_archive: GitHubReleaseAsset,
+    checksums: GitHubReleaseAsset,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = ForgeCli::parse();
-    let api = ForgeApi::connect().await?;
-    run(cli, &api).await
+    if command_requires_api(&cli.command) {
+        let api = ForgeApi::connect().await?;
+        run(cli, &api).await
+    } else {
+        run_local_command(cli.command).await
+    }
 }
 
 async fn run(cli: ForgeCli, api: &ForgeApi) -> Result<()> {
-    match cli.command {
+    run_api_command(cli.command, api).await
+}
+
+fn command_requires_api(command: &Commands) -> bool {
+    !matches!(command, Commands::Update(_) | Commands::Doctor)
+}
+
+async fn run_local_command(command: Commands) -> Result<()> {
+    match command {
+        Commands::Update(args) => run_update(args).await,
+        Commands::Doctor => run_doctor().await,
+        _ => bail!("command requires daemon-backed API access"),
+    }
+}
+
+async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
+    match command {
         Commands::Today => print_today(&api.get_today().await?),
+        Commands::Update(_) | Commands::Doctor => {
+            bail!("local command was routed through the daemon-backed command path")
+        }
         Commands::Project {
             command: ProjectCommand::Add(args),
         } => {
@@ -631,6 +692,416 @@ async fn run(cli: ForgeCli, api: &ForgeApi) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_doctor() -> Result<()> {
+    let current_exe = env::current_exe().context("failed to locate current forge executable")?;
+    let local_paths = ForgePaths::discover()?;
+    let user_path = configured_user_path().ok();
+    let health = probe_local_health().await?;
+    let display_paths = health
+        .as_ref()
+        .map(|response| response.paths.clone())
+        .unwrap_or_else(|| local_paths.clone());
+
+    println!("Forge Environment Check\n");
+    print_doctor_line("OK", "CLI version", env!("CARGO_PKG_VERSION"));
+    print_doctor_line("OK", "CLI binary", current_exe.display());
+
+    match managed_cli_install_root() {
+        Ok(install_root) => {
+            if is_managed_install_binary(&current_exe, &install_root) {
+                print_doctor_line("OK", "CLI installed", install_root.display());
+            } else {
+                print_doctor_line(
+                    "WARN",
+                    "CLI installed",
+                    format!(
+                        "current binary is not running from managed install root {}",
+                        install_root.display()
+                    ),
+                );
+            }
+
+            match user_path.as_deref() {
+                Some(path_value) if path_contains_segment(path_value, &install_root) => {
+                    print_doctor_line("OK", "PATH configured", install_root.display());
+                }
+                Some(_) => {
+                    print_doctor_line(
+                        "WARN",
+                        "PATH configured",
+                        format!("managed install root missing from user PATH ({})", install_root.display()),
+                    );
+                }
+                None => {
+                    print_doctor_line("WARN", "PATH configured", "unable to inspect user PATH");
+                }
+            }
+        }
+        Err(error) => {
+            print_doctor_line("WARN", "CLI installed", error.to_string());
+            print_doctor_line("WARN", "PATH configured", "managed CLI path check unavailable");
+        }
+    }
+
+    let health_url = local_paths.health_url(DEFAULT_API_HOST, DEFAULT_API_PORT);
+    match &health {
+        Some(response) => print_doctor_line(
+            "OK",
+            "daemon reachable",
+            format!("{} (started {})", response.api_base_url, response.started_at),
+        ),
+        None => print_doctor_line("WARN", "daemon reachable", format!("no response at {health_url}")),
+    }
+
+    print_path_check("Config file", &display_paths.config, false);
+    print_path_check("Database file", &display_paths.database, false);
+    print_path_check("Logs directory", &display_paths.logs, true);
+    print_path_check("Daemon log", &display_paths.daemon_log, false);
+
+    println!();
+    println!("Daemon port: {}", DEFAULT_API_PORT);
+    println!("API: {}", health.as_ref().map(|value| value.api_base_url.as_str()).unwrap_or(&local_paths.api_base_url(DEFAULT_API_HOST, DEFAULT_API_PORT)));
+    println!("Database: {}", display_paths.database.display());
+    println!("Config: {}", display_paths.config.display());
+    println!("Logs: {}", display_paths.logs.display());
+    println!("Daemon log: {}", display_paths.daemon_log.display());
+
+    Ok(())
+}
+
+async fn run_update(args: UpdateArgs) -> Result<()> {
+    if !cfg!(windows) {
+        bail!("forge update is currently supported on Windows only");
+    }
+
+    let managed_root = managed_cli_install_root()?;
+    let current_exe = env::current_exe().context("failed to locate current forge executable")?;
+    if !is_managed_install_binary(&current_exe, &managed_root) {
+        bail!(
+            "forge update only supports the managed CLI install at {}. Reinstall Forge with the Windows installer or install-cli.ps1 first.",
+            managed_root.display()
+        );
+    }
+
+    let current_version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .context("invalid Forge CLI version metadata")?;
+    let client = github_client(Duration::from_secs(20))?;
+
+    println!("Checking for updates...\n");
+    let target = fetch_latest_update_target(&client).await?;
+    println!("Current version: {}", current_version);
+    println!("Latest version:  {}", target.latest_version);
+
+    if target.latest_version <= current_version {
+        println!("\nForge is up to date.");
+        return Ok(());
+    }
+
+    if args.check {
+        println!("\nUpdate available: {}", target.release_url);
+        return Ok(());
+    }
+
+    let workspace = update_workspace_root();
+    fs::create_dir_all(&workspace)
+        .with_context(|| format!("failed to create update workspace at {}", workspace.display()))?;
+    let archive_path = workspace.join(&target.cli_archive.name);
+    let checksums_path = workspace.join(CLI_CHECKSUM_ASSET_NAME);
+
+    println!("\nDownloading update...");
+    download_asset(&client, &target.cli_archive.browser_download_url, &archive_path).await?;
+    download_asset(&client, &target.checksums.browser_download_url, &checksums_path).await?;
+
+    println!("Verifying download...");
+    verify_cli_archive(&archive_path, &checksums_path, &target.cli_archive.name)?;
+
+    let daemon_was_running = probe_local_health().await?.is_some();
+
+    println!("Installing...");
+    launch_windows_updater(&archive_path, &workspace, &managed_root, daemon_was_running)?;
+    Ok(())
+}
+
+fn print_doctor_line(label: &str, field: &str, detail: impl std::fmt::Display) {
+    println!("{label:<4} {field}: {detail}");
+}
+
+fn print_path_check(field: &str, path: &Path, expect_directory: bool) {
+    if path.exists() {
+        let kind_matches = if expect_directory { path.is_dir() } else { path.is_file() || path.is_dir() };
+        if kind_matches {
+            print_doctor_line("OK", field, path.display());
+        } else {
+            print_doctor_line("WARN", field, format!("unexpected path type at {}", path.display()));
+        }
+        return;
+    }
+
+    let parent_exists = path.parent().map(Path::exists).unwrap_or(false);
+    if parent_exists {
+        print_doctor_line("WARN", field, format!("missing at {}", path.display()));
+    } else {
+        print_doctor_line("WARN", field, format!("parent directory missing for {}", path.display()));
+    }
+}
+
+async fn probe_local_health() -> Result<Option<HealthResponse>> {
+    let paths = ForgePaths::discover()?;
+    let client = Client::builder()
+        .timeout(Duration::from_millis(800))
+        .build()?;
+    Ok(fetch_health(
+        &client,
+        &paths.health_url(DEFAULT_API_HOST, DEFAULT_API_PORT),
+    )
+    .await)
+}
+
+fn managed_cli_install_root() -> Result<PathBuf> {
+    if !cfg!(windows) {
+        bail!("managed CLI install root is currently supported on Windows only");
+    }
+
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .context("LOCALAPPDATA is not set; cannot resolve managed CLI install root")?;
+    Ok(PathBuf::from(local_app_data).join(MANAGED_INSTALL_RELATIVE_PATH))
+}
+
+fn normalize_path_for_compare(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
+fn path_contains_segment(path_value: &str, segment: &Path) -> bool {
+    let expected = normalize_path_for_compare(segment);
+    path_value
+        .split(';')
+        .filter(|value| !value.trim().is_empty())
+        .any(|value| normalize_path_for_compare(Path::new(value.trim())) == expected)
+}
+
+fn is_managed_install_binary(current_exe: &Path, install_root: &Path) -> bool {
+    current_exe
+        .parent()
+        .map(|parent| normalize_path_for_compare(parent) == normalize_path_for_compare(install_root))
+        .unwrap_or(false)
+}
+
+fn configured_user_path() -> Result<String> {
+    if cfg!(windows) {
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "[Environment]::GetEnvironmentVariable('Path','User')",
+            ])
+            .output()
+            .context("failed to query user PATH via PowerShell")?;
+        if !output.status.success() {
+            bail!("failed to query user PATH via PowerShell");
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    env::var("PATH").context("PATH is not set")
+}
+
+fn github_client(timeout: Duration) -> Result<Client> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_str(&format!("forge/{}", env!("CARGO_PKG_VERSION")))
+            .context("invalid Forge user agent")?,
+    );
+
+    Client::builder()
+        .timeout(timeout)
+        .default_headers(headers)
+        .build()
+        .map_err(Into::into)
+}
+
+async fn fetch_latest_update_target(client: &Client) -> Result<UpdateTarget> {
+    let release = client
+        .get(GITHUB_RELEASES_LATEST_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<GitHubRelease>()
+        .await
+        .context("failed to decode latest GitHub release metadata")?;
+
+    select_update_target(release)
+}
+
+fn select_update_target(release: GitHubRelease) -> Result<UpdateTarget> {
+    let latest_version = Version::parse(release.tag_name.trim_start_matches('v'))
+        .with_context(|| format!("unsupported release tag '{}'", release.tag_name))?;
+    let cli_archive_name = windows_cli_archive_name(&latest_version);
+    let cli_archive = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == cli_archive_name)
+        .cloned()
+        .with_context(|| format!("missing CLI archive asset '{}'", cli_archive_name))?;
+    let checksums = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == CLI_CHECKSUM_ASSET_NAME)
+        .cloned()
+        .with_context(|| format!("missing checksum asset '{}'", CLI_CHECKSUM_ASSET_NAME))?;
+
+    Ok(UpdateTarget {
+        latest_version,
+        release_url: release.html_url,
+        cli_archive,
+        checksums,
+    })
+}
+
+fn windows_cli_archive_name(version: &Version) -> String {
+    format!("forge-v{version}-{WINDOWS_PLATFORM_LABEL}-cli.zip")
+}
+
+async fn download_asset(client: &Client, url: &str, destination: &Path) -> Result<()> {
+    let bytes = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    fs::write(destination, &bytes)
+        .with_context(|| format!("failed to write downloaded asset to {}", destination.display()))
+}
+
+fn verify_cli_archive(archive_path: &Path, checksums_path: &Path, file_name: &str) -> Result<()> {
+    let checksums = fs::read_to_string(checksums_path)
+        .with_context(|| format!("failed to read {}", checksums_path.display()))?;
+    let expected = checksum_for_file(&checksums, file_name)
+        .with_context(|| format!("failed to locate checksum entry for {file_name}"))?;
+    let archive = fs::read(archive_path)
+        .with_context(|| format!("failed to read {}", archive_path.display()))?;
+    let actual = sha256_hex(&archive);
+
+    if actual != expected {
+        bail!("checksum mismatch for {file_name}: expected {expected}, got {actual}");
+    }
+
+    Ok(())
+}
+
+fn checksum_for_file(contents: &str, file_name: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (hash, name) = trimmed.split_once("  ")?;
+        if name.trim() == file_name {
+            Some(hash.trim().to_ascii_lowercase())
+        } else {
+            None
+        }
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest
+        .iter()
+        .map(|value| format!("{value:02x}"))
+        .collect::<String>()
+}
+
+fn update_workspace_root() -> PathBuf {
+    env::temp_dir().join(format!(
+        "forge-update-{}-{}",
+        std::process::id(),
+        Utc::now().timestamp_millis()
+    ))
+}
+
+fn launch_windows_updater(
+    archive_path: &Path,
+    workspace: &Path,
+    install_root: &Path,
+    restart_daemon: bool,
+) -> Result<()> {
+    let script_path = workspace.join("apply-update.ps1");
+    fs::write(&script_path, generate_updater_script())
+        .with_context(|| format!("failed to write updater script to {}", script_path.display()))?;
+
+    Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            script_path.to_string_lossy().as_ref(),
+            "-CurrentPid",
+            &std::process::id().to_string(),
+            "-ZipPath",
+            archive_path.to_string_lossy().as_ref(),
+            "-WorkDir",
+            workspace.to_string_lossy().as_ref(),
+            "-InstallRoot",
+            install_root.to_string_lossy().as_ref(),
+            "-RestartDaemon",
+            if restart_daemon { "$true" } else { "$false" },
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to launch Forge updater")?;
+
+    Ok(())
+}
+
+fn generate_updater_script() -> &'static str {
+    r#"
+param(
+  [int]$CurrentPid,
+  [string]$ZipPath,
+  [string]$WorkDir,
+  [string]$InstallRoot,
+  [bool]$RestartDaemon
+)
+
+$ErrorActionPreference = 'Stop'
+$extractDir = Join-Path $WorkDir 'payload'
+
+while (Get-Process -Id $CurrentPid -ErrorAction SilentlyContinue) {
+  Start-Sleep -Milliseconds 200
+}
+
+Get-Process forged -ErrorAction SilentlyContinue | Stop-Process -Force
+
+if (Test-Path $extractDir) {
+  Remove-Item -Recurse -Force $extractDir
+}
+
+Expand-Archive -Path $ZipPath -DestinationPath $extractDir -Force
+& (Join-Path $extractDir 'install-cli.ps1') -SourceDir $extractDir -Quiet
+
+if ($RestartDaemon) {
+  $daemonExe = Join-Path $InstallRoot 'forged.exe'
+  if (Test-Path $daemonExe) {
+    Start-Process -FilePath $daemonExe -WindowStyle Hidden | Out-Null
+  }
+}
+
+Write-Host ''
+Write-Host 'Forge updated successfully.'
+if ($RestartDaemon) {
+  Write-Host 'Forge daemon restarted.'
+}
+"#
 }
 
 #[derive(Clone)]
@@ -1653,5 +2124,55 @@ mod tests {
         assert!(message.contains("forged.log"));
         assert!(message.contains("config.toml"));
         assert!(message.contains("forge.db"));
+    }
+
+    #[test]
+    fn command_requires_api_skips_local_maintenance_commands() {
+        assert!(!command_requires_api(&Commands::Update(UpdateArgs { check: false })));
+        assert!(!command_requires_api(&Commands::Doctor));
+        assert!(command_requires_api(&Commands::Today));
+    }
+
+    #[test]
+    fn select_update_target_picks_stable_cli_assets() {
+        let target = select_update_target(GitHubRelease {
+            tag_name: "v0.1.2".to_string(),
+            html_url: "https://github.com/Kasuletrevor/forge/releases/tag/v0.1.2".to_string(),
+            assets: vec![
+                GitHubReleaseAsset {
+                    name: "forge-v0.1.2-windows-x64-cli.zip".to_string(),
+                    browser_download_url: "https://example.com/forge-v0.1.2-windows-x64-cli.zip"
+                        .to_string(),
+                },
+                GitHubReleaseAsset {
+                    name: CLI_CHECKSUM_ASSET_NAME.to_string(),
+                    browser_download_url: "https://example.com/SHA256SUMS.txt".to_string(),
+                },
+            ],
+        })
+        .expect("update target");
+
+        assert_eq!(target.latest_version, Version::parse("0.1.2").unwrap());
+        assert_eq!(target.cli_archive.name, "forge-v0.1.2-windows-x64-cli.zip");
+        assert_eq!(target.checksums.name, CLI_CHECKSUM_ASSET_NAME);
+    }
+
+    #[test]
+    fn checksum_lookup_and_path_segment_matching_work() {
+        let checksums = "abc123  forge-v0.1.2-windows-x64-cli.zip\nfff999  other.zip\n";
+        assert_eq!(
+            checksum_for_file(checksums, "forge-v0.1.2-windows-x64-cli.zip").as_deref(),
+            Some("abc123")
+        );
+
+        let managed_root = PathBuf::from("C:\\Users\\Trevor\\AppData\\Local\\Programs\\Forge\\bin");
+        assert!(path_contains_segment(
+            "C:\\Windows\\System32;C:\\Users\\Trevor\\AppData\\Local\\Programs\\Forge\\bin",
+            &managed_root
+        ));
+        assert!(is_managed_install_binary(
+            Path::new("C:\\Users\\Trevor\\AppData\\Local\\Programs\\Forge\\bin\\forge.exe"),
+            &managed_root
+        ));
     }
 }
