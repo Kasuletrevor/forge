@@ -21,7 +21,7 @@ use reqwest::Client;
 use serde::Serialize;
 
 #[derive(Debug, Parser)]
-#[command(name = "forge", about = "Forge CLI")]
+#[command(name = "forge", about = "Forge CLI", version)]
 struct ForgeCli {
     #[command(subcommand)]
     command: Commands,
