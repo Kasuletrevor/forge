@@ -186,6 +186,11 @@ jobs:
             throw "Expected forge today to succeed after CLI install, got: $today"
           }
 
+          $doctor = & forge doctor
+          if ($doctor -notmatch "^Forge Environment Check") {
+            throw "Expected forge doctor to succeed after CLI install, got: $doctor"
+          }
+
           Get-Process forged -ErrorAction SilentlyContinue | Stop-Process -Force
           & (Join-Path $extractDir "uninstall-cli.ps1")
 
@@ -210,6 +215,11 @@ jobs:
           $version = & forge --version
           if ($version -notmatch "^forge ") {
             throw "Expected forge --version after desktop install, got: $version"
+          }
+
+          $doctor = & forge doctor
+          if ($doctor -notmatch "^Forge Environment Check") {
+            throw "Expected forge doctor after desktop install, got: $doctor"
           }
 
       - name: Generate checksums

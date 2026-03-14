@@ -24,6 +24,11 @@ Install behavior:
 - `portable.zip` is for manual desktop distribution and debugging and does not modify `PATH`
 - `cli.zip` installs just the CLI and daemon for terminal-first use
 
+CLI maintenance commands:
+
+- `forge doctor` checks the local install, `PATH`, daemon health, and local data paths
+- `forge update` updates the managed CLI install from the latest stable GitHub release
+
 Current Windows releases are unsigned, so SmartScreen may warn on first launch.
 
 ## Current Shape
@@ -180,6 +185,8 @@ Editing and deletion in the UI use API-backed TanStack Query mutations with quer
 Representative commands:
 
 ```text
+forge doctor
+forge update
 forge project add|list|show|edit|delete
 forge task add|list|today|done|clear-done|edit|delete
 forge event add|list|edit|delete
