@@ -85,6 +85,7 @@ For every release, verify:
 - portable zip contains `Forge.exe` and `forged.exe`
 - CLI zip contains `forge.exe`, `forged.exe`, install scripts, and `README.txt`
 - `forge --version` works from a fresh terminal after install
+- `forge doctor` works from the managed CLI install
 - `forge today` can auto-start `forged`
 - launching Forge makes `GET /health` return `ok`
 - first run creates config, database, and log paths under `~/.forge`
@@ -95,3 +96,4 @@ For every release, verify:
 - Releases are currently unsigned.
 - Windows SmartScreen warnings are expected until signing is added.
 - This workflow is Windows-first; macOS and Linux packaging are out of scope for the current release phase.
+- `forge update` should continue to target the stable `forge-v<version>-windows-x64-cli.zip` asset and validate it against `SHA256SUMS.txt`.
