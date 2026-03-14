@@ -155,6 +155,63 @@ jobs:
             Get-Process forged -ErrorAction SilentlyContinue | Stop-Process -Force
           }
 
+      - name: Smoke standalone CLI install
+        shell: powershell
+        run: |
+          $cliZip = Join-Path $PWD "apps\desktop\dist\release\forge-v${{ needs.tag-check.outputs.release_version }}-windows-x64-cli.zip"
+          $extractDir = Join-Path $env:RUNNER_TEMP "forge-cli"
+          $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Forge\bin"
+          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+
+          Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+          Expand-Archive -Path $cliZip -DestinationPath $extractDir -Force
+          & (Join-Path $extractDir "install-cli.ps1")
+
+          if (-not (Test-Path (Join-Path $installRoot "forge.exe"))) {
+            throw "CLI installer did not place forge.exe in $installRoot"
+          }
+
+          if (-not (($userPath = [Environment]::GetEnvironmentVariable("Path", "User")) -split ";" | Where-Object { $_ -eq $installRoot })) {
+            throw "Forge CLI install root was not added to the user PATH"
+          }
+
+          $env:Path = "$([Environment]::GetEnvironmentVariable('Path', 'User'));$([Environment]::GetEnvironmentVariable('Path', 'Machine'))"
+          $version = & forge --version
+          if ($version -notmatch "^forge ") {
+            throw "Expected forge --version to succeed after CLI install, got: $version"
+          }
+
+          $today = & forge today
+          if ($today -notmatch "^Today ") {
+            throw "Expected forge today to succeed after CLI install, got: $today"
+          }
+
+          Get-Process forged -ErrorAction SilentlyContinue | Stop-Process -Force
+          & (Join-Path $extractDir "uninstall-cli.ps1")
+
+      - name: Smoke desktop installer CLI integration
+        shell: powershell
+        run: |
+          $installer = Join-Path $PWD "apps\desktop\dist\release\forge-v${{ needs.tag-check.outputs.release_version }}-windows-x64-setup.exe"
+          $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Forge\bin"
+
+          Get-Process forge-desktop,Forge,forged -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Process -FilePath $installer -ArgumentList "/S" -Wait
+
+          if (-not (Test-Path (Join-Path $installRoot "forge.exe"))) {
+            throw "Desktop installer did not provision forge.exe in $installRoot"
+          }
+
+          if (-not (([Environment]::GetEnvironmentVariable("Path", "User")) -split ";" | Where-Object { $_ -eq $installRoot })) {
+            throw "Desktop installer did not add the Forge CLI path to the user PATH"
+          }
+
+          $env:Path = "$([Environment]::GetEnvironmentVariable('Path', 'User'));$([Environment]::GetEnvironmentVariable('Path', 'Machine'))"
+          $version = & forge --version
+          if ($version -notmatch "^forge ") {
+            throw "Expected forge --version after desktop install, got: $version"
+          }
+
       - name: Generate checksums
         shell: powershell
         run: |

@@ -91,8 +91,13 @@ jobs:
       - name: Verify desktop version sync
         run: npm run verify:version --prefix apps/desktop
 
-      - name: Build Forge daemon release binary
-        run: cargo build -p forged --release --target x86_64-pc-windows-msvc
+      - name: Build Forge CLI and daemon release binaries
+        run: |
+          cargo build -p forge --release --target x86_64-pc-windows-msvc
+          cargo build -p forged --release --target x86_64-pc-windows-msvc
+
+      - name: Stage desktop sidecar and CLI resources
+        run: node apps/desktop/scripts/stage-sidecar.mjs
 
       - name: Check desktop crate
         run: cargo check -p forge-desktop
