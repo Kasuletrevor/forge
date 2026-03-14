@@ -1,6 +1,6 @@
 # Releasing Forge
 
-Forge uses a Windows-first desktop release flow modeled after Codex's split CI and release pipelines.
+Forge uses a Windows-first desktop and CLI release flow modeled after Codex's split CI and release pipelines.
 
 ## Release Workflow
 
@@ -40,7 +40,8 @@ git push origin v0.1.0
 1. Wait for `Desktop Release` to finish.
 2. Confirm the GitHub Release contains:
    - installer `.exe`
-   - portable `.zip`
+   - desktop portable `.zip`
+   - CLI `.zip`
    - `SHA256SUMS.txt`
 
 ## Dry-Run Artifact Testing
@@ -53,7 +54,7 @@ gh run watch
 gh run download <run-id> --name forge-desktop-windows-x64 --dir artifacts
 ```
 
-This is the expected loop while refining installer and portable asset behavior.
+This is the expected loop while refining installer, CLI, and portable asset behavior.
 
 ## Local Windows Packaging
 
@@ -69,16 +70,22 @@ npm run build:release --prefix apps/desktop
 That flow:
 
 - builds `forged` as a release sidecar
+- builds `forge` as a release CLI binary
 - stages the sidecar for Tauri bundling
 - builds the NSIS installer
-- creates the portable zip in `apps/desktop/dist/release`
+- creates the desktop portable zip in `apps/desktop/dist/release`
+- creates the standalone CLI zip in `apps/desktop/dist/release`
 
 ## Release Smoke Checklist
 
 For every release, verify:
 
 - installer exists and launches Forge
+- installer configures `%LOCALAPPDATA%\\Programs\\Forge\\bin` and user `PATH`
 - portable zip contains `Forge.exe` and `forged.exe`
+- CLI zip contains `forge.exe`, `forged.exe`, install scripts, and `README.txt`
+- `forge --version` works from a fresh terminal after install
+- `forge today` can auto-start `forged`
 - launching Forge makes `GET /health` return `ok`
 - first run creates config, database, and log paths under `~/.forge`
 - Settings shows the live runtime paths
