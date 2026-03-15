@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
+    sync::mpsc,
     env,
     fs::OpenOptions,
     io::Write,
@@ -10,6 +11,7 @@ use std::{
 };
 
 use tauri::AppHandle;
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::{process::CommandEvent, ShellExt};
 
 #[tauri::command]
@@ -44,6 +46,23 @@ async fn ensure_daemon(app: AppHandle) -> Result<String, String> {
     }
 
     Err(format_startup_failure(&paths, &health_url, exit_status))
+}
+
+#[tauri::command]
+async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+    let (sender, receiver) = mpsc::channel();
+    app.dialog()
+        .file()
+        .pick_folder(move |path| {
+            let value = path.and_then(|handle| handle.into_path().ok());
+            let _ = sender.send(value);
+        });
+
+    let path = receiver
+        .recv()
+        .map_err(|error| format!("failed to receive directory selection: {error}"))?;
+
+    Ok(path.map(|selected| selected.to_string_lossy().into_owned()))
 }
 
 async fn daemon_ready(health_url: &str) -> bool {
@@ -177,8 +196,9 @@ fn format_startup_failure(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![ensure_daemon])
+        .invoke_handler(tauri::generate_handler![ensure_daemon, pick_directory])
         .run(tauri::generate_context!())
         .expect("failed to run Forge desktop");
 }
