@@ -30,6 +30,7 @@ const projectSummary: ProjectSummary = {
     status: 'active',
     tags: [],
     color: '#6f8466',
+    workdir_path: null,
     created_at: '2026-03-09T00:00:00Z',
     updated_at: '2026-03-09T00:00:00Z',
   },

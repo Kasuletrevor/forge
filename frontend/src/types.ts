@@ -27,6 +27,7 @@ export interface Project {
   status: ProjectStatus
   tags: string[]
   color: string
+  workdir_path: string | null
   created_at: string
   updated_at: string
 }
@@ -35,6 +36,22 @@ export interface ProjectSummary {
   project: Project
   open_task_count: number
   upcoming_event_count: number
+}
+
+export interface ProjectRepoStatus {
+  project_id: number
+  workdir_path: string | null
+  is_git_repo: boolean
+  repo_root: string | null
+  branch: string | null
+  remote_url: string | null
+  default_branch: string | null
+  dirty: boolean
+  dirty_file_count: number
+  last_commit_sha: string | null
+  last_commit_summary: string | null
+  last_commit_at: string | null
+  status_error: string | null
 }
 
 export interface Task {
@@ -142,6 +159,7 @@ export interface CreateProjectRequest {
   status: ProjectStatus
   tags: string[]
   color: string
+  workdir_path: string | null
 }
 
 export interface UpdateProjectRequest {
@@ -150,6 +168,7 @@ export interface UpdateProjectRequest {
   status?: ProjectStatus
   tags?: string[]
   color?: string
+  workdir_path?: string | null
 }
 
 export interface CreateTaskRequest {
