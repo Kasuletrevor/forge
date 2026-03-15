@@ -55,6 +55,7 @@ Tasks are often tracked as isolated items instead of as part of larger projects.
 * what is blocked
 * what is scheduled
 * what belongs together
+* which local codebase or working directory the project actually maps to
 
 ### 2.3 Weak connection between tasks and time
 
@@ -224,6 +225,16 @@ The user returns to a project and sees:
 * recent focus state
 * next likely actions
 
+### 7.8 Codebase-aware project context
+
+The user links a project to a local working directory and sees:
+
+* the linked path
+* whether the directory is a git repo
+* the current branch
+* whether the working tree is dirty
+* the latest commit summary
+
 ---
 
 ## 8. Product principles
@@ -284,6 +295,7 @@ The system must allow the user to:
 * status
 * tags
 * color
+* workdir_path (optional)
 * created_at
 * updated_at
 
@@ -296,6 +308,7 @@ The system must allow the user to:
 ### Project detail view should include
 
 * project metadata
+* optional linked workdir and repo status
 * open tasks
 * scheduled events
 * current focus relevance
@@ -566,6 +579,7 @@ The CLI is a first-class interface, not a secondary convenience.
 The CLI must allow:
 
 * project creation and listing
+* project linking to local workdirs and repo status inspection
 * project editing and deletion
 * task creation, listing, updating, and completion
 * task deletion
@@ -580,6 +594,8 @@ The CLI must allow:
 forge project add "Project Name"
 forge project list
 forge project show project-name
+forge project link project-name "C:\Users\Trevor\workspace\Forge"
+forge project status project-name
 forge project edit project-name --color "#6f8466"
 forge project delete project-name --yes
 
@@ -625,6 +641,7 @@ The API should allow agents and integrations to manipulate the system programmat
 ### Required capabilities
 
 * CRUD for projects
+* linked workdir resolution and live project status reads
 * CRUD for tasks
 * CRUD for events
 * focus state retrieval and mutation
@@ -640,6 +657,12 @@ The API should allow agents and integrations to manipulate the system programmat
 * `PATCH /projects/{id}`
 
 * `DELETE /projects/{id}`
+
+* `GET /projects/statuses`
+
+* `GET /projects/{id}/status`
+
+* `GET /projects/resolve-by-path?cwd=...`
 
 * `GET /tasks`
 

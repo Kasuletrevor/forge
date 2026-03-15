@@ -36,6 +36,7 @@ Current Windows releases are unsigned, so SmartScreen may warn on first launch.
 Forge currently supports:
 
 - projects with status, color, tags, and edit and delete flows
+- optional project-linked workdirs with live git-aware status from the daemon
 - tasks with inbox support, scheduling, completion, edit and delete flows, and project reassignment
 - events with recurrence support, linked tasks, edit and delete flows, and calendar drag and resize interactions
 - focus state and Today summary views
@@ -187,7 +188,7 @@ Representative commands:
 ```text
 forge doctor
 forge update
-forge project add|list|show|edit|delete
+forge project add|list|show|status|link|unlink|edit|delete
 forge task add|list|today|done|clear-done|edit|delete
 forge event add|list|edit|delete
 forge focus ...
@@ -205,6 +206,9 @@ GET    /health
 GET    /today
 GET    /calendar/range
 GET    /projects
+GET    /projects/statuses
+GET    /projects/{id}/status
+GET    /projects/resolve-by-path
 PATCH  /projects/{id}
 DELETE /projects/{id}
 GET    /tasks
