@@ -59,6 +59,7 @@ impl SqliteStore {
                 p.status,
                 p.tags,
                 p.color,
+                p.workdir_path,
                 p.created_at,
                 p.updated_at,
                 (
@@ -106,8 +107,8 @@ impl SqliteStore {
         let status = to_db_enum(input.status)?;
         let result = sqlx::query(
             r#"
-            INSERT INTO projects (name, slug, description, status, tags, color, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT INTO projects (name, slug, description, status, tags, color, workdir_path, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
         .bind(&input.name)
@@ -116,6 +117,7 @@ impl SqliteStore {
         .bind(status)
         .bind(tags)
         .bind(&input.color)
+        .bind(&input.workdir_path)
         .bind(&now)
         .bind(&now)
         .execute(self.pool())
@@ -151,13 +153,16 @@ impl SqliteStore {
         if let Some(color) = &input.color {
             current.color = color.clone();
         }
+        if let Some(workdir_path) = &input.workdir_path {
+            current.workdir_path = workdir_path.clone();
+        }
         current.updated_at = domain::now_timestamp();
 
         sqlx::query(
             r#"
             UPDATE projects
-            SET name = ?1, slug = ?2, description = ?3, status = ?4, tags = ?5, color = ?6, updated_at = ?7
-            WHERE id = ?8
+            SET name = ?1, slug = ?2, description = ?3, status = ?4, tags = ?5, color = ?6, workdir_path = ?7, updated_at = ?8
+            WHERE id = ?9
             "#,
         )
         .bind(&current.name)
@@ -166,6 +171,7 @@ impl SqliteStore {
         .bind(to_db_enum(current.status)?)
         .bind(encode_json(&current.tags)?)
         .bind(&current.color)
+        .bind(&current.workdir_path)
         .bind(&current.updated_at)
         .bind(id)
         .execute(self.pool())
@@ -598,6 +604,7 @@ struct ProjectRow {
     status: String,
     tags: String,
     color: String,
+    workdir_path: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -611,6 +618,7 @@ struct ProjectSummaryRow {
     status: String,
     tags: String,
     color: String,
+    workdir_path: Option<String>,
     created_at: String,
     updated_at: String,
     open_task_count: i64,
@@ -676,6 +684,7 @@ impl TryFrom<ProjectRow> for Project {
             status: from_db_enum(&value.status)?,
             tags: decode_json(&value.tags)?,
             color: value.color,
+            workdir_path: value.workdir_path,
             created_at: value.created_at,
             updated_at: value.updated_at,
         })
@@ -695,6 +704,7 @@ impl TryFrom<ProjectSummaryRow> for ProjectSummary {
                 status: from_db_enum(&value.status)?,
                 tags: decode_json(&value.tags)?,
                 color: value.color,
+                workdir_path: value.workdir_path,
                 created_at: value.created_at,
                 updated_at: value.updated_at,
             },

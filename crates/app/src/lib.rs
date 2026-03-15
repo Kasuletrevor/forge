@@ -1,12 +1,19 @@
 use anyhow::Result;
+use std::{
+    env,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz as ChronoTz;
 use domain::{
     CalendarOccurrence, CalendarRangeQuery, CreateEventRequest, CreateProjectRequest,
-    CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult,
-    Project, ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus,
-    TodaySummary, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, ValidationError,
-    parse_rfc3339, require_non_empty,
+    CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult, Project,
+    ProjectRepoStatus, ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery,
+    TaskStatus, TodaySummary, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest,
+    ValidationError, parse_rfc3339, require_non_empty,
 };
 use persistence_sqlite::SqliteStore;
 use rrule::{RRuleSet, Tz};
@@ -62,6 +69,18 @@ impl ForgeService {
     }
 
     #[instrument(skip(self))]
+    pub async fn list_project_statuses(
+        &self,
+        include_archived: bool,
+    ) -> AppResult<Vec<ProjectRepoStatus>> {
+        let projects = self.list_projects(include_archived).await?;
+        Ok(projects
+            .into_iter()
+            .map(|summary| inspect_project_repo(&summary.project))
+            .collect())
+    }
+
+    #[instrument(skip(self))]
     pub async fn get_project(&self, id: i64) -> AppResult<Project> {
         self.store
             .get_project(id)
@@ -70,10 +89,43 @@ impl ForgeService {
             .ok_or(AppError::NotFound("project"))
     }
 
+    #[instrument(skip(self))]
+    pub async fn get_project_status(&self, id: i64) -> AppResult<ProjectRepoStatus> {
+        let project = self.get_project(id).await?;
+        Ok(inspect_project_repo(&project))
+    }
+
+    #[instrument(skip(self, cwd))]
+    pub async fn resolve_project_by_path(&self, cwd: &str) -> AppResult<Project> {
+        let resolved_cwd = canonicalize_project_path(cwd)?;
+        let cwd_key = normalize_path_key(&resolved_cwd);
+        let projects = self.list_projects(true).await?;
+
+        projects
+            .into_iter()
+            .map(|summary| summary.project)
+            .filter_map(|project| {
+                let workdir = project.workdir_path.as_ref()?;
+                let project_root = PathBuf::from(workdir);
+                let project_key = normalize_path_key(&project_root);
+                if path_key_has_ancestor(&cwd_key, &project_key) {
+                    Some((project_root.components().count(), project))
+                } else {
+                    None
+                }
+            })
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, project)| project)
+            .ok_or(AppError::NotFound("project"))
+    }
+
     #[instrument(skip(self, input))]
-    pub async fn create_project(&self, input: CreateProjectRequest) -> AppResult<Project> {
+    pub async fn create_project(&self, mut input: CreateProjectRequest) -> AppResult<Project> {
         require_non_empty(&input.name, "project.name")?;
         require_non_empty(&input.color, "project.color")?;
+        input.workdir_path = self
+            .prepare_project_workdir(input.workdir_path.take(), None)
+            .await?;
         self.store
             .create_project(&input)
             .await
@@ -84,13 +136,16 @@ impl ForgeService {
     pub async fn update_project(
         &self,
         id: i64,
-        input: UpdateProjectRequest,
+        mut input: UpdateProjectRequest,
     ) -> AppResult<Project> {
         if let Some(name) = &input.name {
             require_non_empty(name, "project.name")?;
         }
         if let Some(color) = &input.color {
             require_non_empty(color, "project.color")?;
+        }
+        if let Some(workdir_path) = input.workdir_path.take() {
+            input.workdir_path = Some(self.prepare_project_workdir(workdir_path, Some(id)).await?);
         }
         self.store
             .update_project(id, &input)
@@ -526,6 +581,40 @@ impl ForgeService {
         Ok(())
     }
 
+    async fn prepare_project_workdir(
+        &self,
+        workdir_path: Option<String>,
+        current_project_id: Option<i64>,
+    ) -> AppResult<Option<String>> {
+        let Some(workdir_path) = workdir_path else {
+            return Ok(None);
+        };
+
+        let canonical = path_to_display_string(&canonicalize_project_path(&workdir_path)?);
+        let path_key = normalize_path_key(Path::new(&canonical));
+        let projects = self.list_projects(true).await?;
+
+        if let Some(conflict) = projects
+            .into_iter()
+            .map(|summary| summary.project)
+            .find(|project| {
+                project.id != current_project_id.unwrap_or_default()
+                    && project
+                        .workdir_path
+                        .as_deref()
+                        .map(|value| normalize_path_key(Path::new(value)) == path_key)
+                        .unwrap_or(false)
+            })
+        {
+            return Err(AppError::Conflict(format!(
+                "project '{}' is already linked to {}",
+                conflict.name, canonical
+            )));
+        }
+
+        Ok(Some(canonical))
+    }
+
     fn map_store_error(error: anyhow::Error) -> AppError {
         let message = error.to_string();
         if message.contains("UNIQUE constraint failed") {
@@ -533,6 +622,240 @@ impl ForgeService {
         }
         AppError::Internal(error)
     }
+}
+
+fn canonicalize_project_path(raw: &str) -> AppResult<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::Validation(
+            "project.workdir_path must not be empty".to_string(),
+        ));
+    }
+
+    let expanded = expand_home_path(trimmed);
+    if !expanded.is_absolute() {
+        return Err(AppError::Validation(
+            "project.workdir_path must be absolute or start with '~'".to_string(),
+        ));
+    }
+
+    let canonical = fs::canonicalize(&expanded).map_err(|error| {
+        AppError::Validation(format!(
+            "project.workdir_path could not be resolved: {} ({error})",
+            expanded.display()
+        ))
+    })?;
+
+    if !canonical.is_dir() {
+        return Err(AppError::Validation(format!(
+            "project.workdir_path is not a directory: {}",
+            canonical.display()
+        )));
+    }
+
+    Ok(canonical)
+}
+
+fn expand_home_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        if let Some(home) = home_dir() {
+            return home.join(rest);
+        }
+    }
+
+    PathBuf::from(raw)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = env::var_os("HOMEDRIVE")?;
+                let path = env::var_os("HOMEPATH")?;
+                let mut root = PathBuf::from(drive);
+                root.push(path);
+                Some(root)
+            })
+    } else {
+        env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+fn path_to_display_string(path: &Path) -> String {
+    let value = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+    } else {
+        value
+    }
+}
+
+fn normalize_path_key(path: &Path) -> String {
+    let normalized = path_to_display_string(path);
+    if cfg!(windows) {
+        normalized.to_ascii_lowercase()
+    } else {
+        normalized
+    }
+}
+
+fn path_key_has_ancestor(path: &str, ancestor: &str) -> bool {
+    path == ancestor || path.starts_with(&format!("{ancestor}{}", std::path::MAIN_SEPARATOR))
+}
+
+fn inspect_project_repo(project: &Project) -> ProjectRepoStatus {
+    let mut status = ProjectRepoStatus {
+        project_id: project.id,
+        workdir_path: project.workdir_path.clone(),
+        is_git_repo: false,
+        repo_root: None,
+        branch: None,
+        remote_url: None,
+        default_branch: None,
+        dirty: false,
+        dirty_file_count: 0,
+        last_commit_sha: None,
+        last_commit_summary: None,
+        last_commit_at: None,
+        status_error: None,
+    };
+
+    let Some(workdir_path) = project.workdir_path.as_deref() else {
+        return status;
+    };
+
+    let workdir = PathBuf::from(workdir_path);
+    if !workdir.exists() {
+        status.status_error = Some(format!("linked directory missing: {}", workdir.display()));
+        return status;
+    }
+    if !workdir.is_dir() {
+        status.status_error = Some(format!("linked path is not a directory: {}", workdir.display()));
+        return status;
+    }
+
+    let repo_root = match run_git_command(&workdir, &["rev-parse", "--show-toplevel"]) {
+        Ok(output) => PathBuf::from(output),
+        Err(GitCommandError::NotRepo) => return status,
+        Err(GitCommandError::MissingGit) => {
+            status.status_error = Some("git executable not found".to_string());
+            return status;
+        }
+        Err(GitCommandError::Other(message)) => {
+            status.status_error = Some(message);
+            return status;
+        }
+    };
+
+    status.is_git_repo = true;
+    status.repo_root = Some(path_to_display_string(&repo_root));
+
+    if let Ok(branch) = run_git_command(&repo_root, &["branch", "--show-current"]) {
+        if !branch.is_empty() {
+            status.branch = Some(branch);
+        }
+    }
+    if status.branch.is_none()
+        && let Ok(head) = run_git_command(&repo_root, &["rev-parse", "--short", "HEAD"])
+        && !head.is_empty()
+    {
+        status.branch = Some(format!("detached@{head}"));
+    }
+
+    if let Ok(remote_url) = run_git_command(&repo_root, &["remote", "get-url", "origin"])
+        && !remote_url.is_empty()
+    {
+        status.remote_url = Some(remote_url);
+    }
+
+    if let Ok(default_branch) = run_git_command(
+        &repo_root,
+        &["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        let branch = default_branch
+            .strip_prefix("origin/")
+            .unwrap_or(&default_branch)
+            .to_string();
+        if !branch.is_empty() {
+            status.default_branch = Some(branch);
+        }
+    }
+
+    if let Ok(porcelain) = run_git_command(&repo_root, &["status", "--porcelain"]) {
+        let dirty_file_count = porcelain
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as i64;
+        status.dirty_file_count = dirty_file_count;
+        status.dirty = dirty_file_count > 0;
+    }
+
+    if let Ok(commit_log) = run_git_command(&repo_root, &["log", "-1", "--format=%H%n%s%n%cI"]) {
+        let mut lines = commit_log.lines();
+        status.last_commit_sha = lines
+            .next()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        status.last_commit_summary = lines
+            .next()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        status.last_commit_at = lines
+            .next()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+    }
+
+    status
+}
+
+enum GitCommandError {
+    NotRepo,
+    MissingGit,
+    Other(String),
+}
+
+fn run_git_command(directory: &Path, args: &[&str]) -> Result<String, GitCommandError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                GitCommandError::MissingGit
+            } else {
+                GitCommandError::Other(format!(
+                    "failed to run git in {}: {error}",
+                    directory.display()
+                ))
+            }
+        })?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("not a git repository") {
+        return Err(GitCommandError::NotRepo);
+    }
+
+    Err(GitCommandError::Other(if stderr.is_empty() {
+        format!(
+            "git {} failed in {} with status {}",
+            args.join(" "),
+            directory.display(),
+            output.status
+        )
+    } else {
+        stderr
+    }))
 }
 
 fn task_matches_day(task: &Task, day: chrono::NaiveDate) -> bool {
@@ -808,6 +1131,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#6f8466".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -872,6 +1196,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#d96b2b".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -915,6 +1240,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#456257".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -973,6 +1299,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#91503f".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1031,6 +1358,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec!["active".to_string()],
                 color: "#3d6b80".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1096,6 +1424,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#2a5e47".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1267,6 +1596,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#38586f".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1322,5 +1652,123 @@ mod tests {
         assert_eq!(updated.linked_task_id, Some(task.id));
         assert_eq!(refreshed_task.scheduled_start.as_deref(), Some("2026-03-09T11:00:00-04:00"));
         assert_eq!(refreshed_task.scheduled_end.as_deref(), Some("2026-03-09T12:30:00-04:00"));
+    }
+
+    #[tokio::test]
+    async fn project_workdir_links_are_canonicalized_and_unique() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let repo_path = temp.path().join("forge-linked");
+        std::fs::create_dir_all(&repo_path).expect("repo dir");
+
+        let project = service
+            .create_project(CreateProjectRequest {
+                name: "Linked".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#556b5f".to_string(),
+                workdir_path: Some(repo_path.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("linked project");
+
+        let expected = repo_path
+            .canonicalize()
+            .expect("canonical repo path")
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_string();
+        assert_eq!(project.workdir_path.as_deref(), Some(expected.as_str()));
+
+        let error = service
+            .create_project(CreateProjectRequest {
+                name: "Duplicate".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#65745d".to_string(),
+                workdir_path: Some(repo_path.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect_err("duplicate path should fail");
+
+        assert!(
+            error.to_string().contains("already linked"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_project_by_path_prefers_the_deepest_matching_link() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let parent = temp.path().join("workspace");
+        let child = parent.join("nested");
+        let leaf = child.join("src");
+        std::fs::create_dir_all(&leaf).expect("nested workspace");
+
+        let parent_project = service
+            .create_project(CreateProjectRequest {
+                name: "Workspace".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#6a6f53".to_string(),
+                workdir_path: Some(parent.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("parent project");
+        let child_project = service
+            .create_project(CreateProjectRequest {
+                name: "Nested".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#516b70".to_string(),
+                workdir_path: Some(child.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("child project");
+
+        let resolved = service
+            .resolve_project_by_path(&leaf.to_string_lossy())
+            .await
+            .expect("resolved project");
+
+        assert_eq!(resolved.id, child_project.id);
+        assert_ne!(resolved.id, parent_project.id);
+    }
+
+    #[tokio::test]
+    async fn project_status_reports_linked_non_repo_directories_without_failing() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let folder = temp.path().join("notes");
+        std::fs::create_dir_all(&folder).expect("plain folder");
+
+        let project = service
+            .create_project(CreateProjectRequest {
+                name: "Notes".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#6d6756".to_string(),
+                workdir_path: Some(folder.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("project");
+
+        let status = service
+            .get_project_status(project.id)
+            .await
+            .expect("project status");
+
+        assert_eq!(status.project_id, project.id);
+        assert_eq!(status.workdir_path, project.workdir_path);
+        assert!(!status.is_git_repo);
+        assert_eq!(status.branch, None);
+        assert_eq!(status.repo_root, None);
+        assert_eq!(status.status_error, None);
     }
 }

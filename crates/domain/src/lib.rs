@@ -94,6 +94,7 @@ pub struct Project {
     pub status: ProjectStatus,
     pub tags: Vec<String>,
     pub color: String,
+    pub workdir_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -103,6 +104,23 @@ pub struct ProjectSummary {
     pub project: Project,
     pub open_task_count: i64,
     pub upcoming_event_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRepoStatus {
+    pub project_id: i64,
+    pub workdir_path: Option<String>,
+    pub is_git_repo: bool,
+    pub repo_root: Option<String>,
+    pub branch: Option<String>,
+    pub remote_url: Option<String>,
+    pub default_branch: Option<String>,
+    pub dirty: bool,
+    pub dirty_file_count: i64,
+    pub last_commit_sha: Option<String>,
+    pub last_commit_summary: Option<String>,
+    pub last_commit_at: Option<String>,
+    pub status_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +254,7 @@ pub struct CreateProjectRequest {
     pub tags: Vec<String>,
     #[serde(default = "default_project_color")]
     pub color: String,
+    pub workdir_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -250,6 +269,12 @@ pub struct UpdateProjectRequest {
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_patch_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workdir_path: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
