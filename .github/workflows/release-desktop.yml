@@ -197,7 +197,8 @@ jobs:
           }
 
           $today = Get-Content $todayOut -Raw
-          if ($todayProcess.ExitCode -ne 0) {
+          $todayProcess.Refresh()
+          if ($null -ne $todayProcess.ExitCode -and $todayProcess.ExitCode -ne 0) {
             $stderr = if (Test-Path $todayErr) { Get-Content $todayErr -Raw } else { "" }
             throw "forge today exited with code $($todayProcess.ExitCode). stdout: $today stderr: $stderr"
           }
