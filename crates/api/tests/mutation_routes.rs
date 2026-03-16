@@ -40,6 +40,7 @@ async fn patch_project_updates_metadata() {
             status: ProjectStatus::Active,
             tags: vec![],
             color: "#6f8466".to_string(),
+        workdir_path: None,
         })
         .await
         .expect("project");
@@ -58,6 +59,7 @@ async fn patch_project_updates_metadata() {
                         status: Some(ProjectStatus::Paused),
                         tags: Some(vec!["mutated".to_string()]),
                         color: Some("#123456".to_string()),
+                    workdir_path: None,
                     })
                     .expect("payload"),
                 ))
@@ -77,6 +79,64 @@ async fn patch_project_updates_metadata() {
 }
 
 #[tokio::test]
+async fn patch_project_sets_and_clears_workdir_path() {
+    let service = service().await;
+    let temp = tempdir().expect("tempdir");
+    let workdir = temp.path().join("forge");
+    std::fs::create_dir_all(&workdir).expect("workdir");
+    let project = service
+        .create_project(CreateProjectRequest {
+            name: "Forge".to_string(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            tags: vec![],
+            color: "#556b5f".to_string(),
+            workdir_path: None,
+        })
+        .await
+        .expect("project");
+
+    let app = api::router(service.clone());
+    let set_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/projects/{}", project.id))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "workdir_path": workdir.to_string_lossy()
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(set_response.status(), StatusCode::OK);
+    let linked: domain::Project = json(set_response).await;
+    assert!(linked.workdir_path.is_some());
+
+    let clear_response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/projects/{}", project.id))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "workdir_path": null }).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(clear_response.status(), StatusCode::OK);
+    let cleared: domain::Project = json(clear_response).await;
+    assert_eq!(cleared.workdir_path, None);
+}
+
+#[tokio::test]
 async fn patch_task_marks_completion_and_moves_to_inbox() {
     let service = service().await;
     let project = service
@@ -86,6 +146,7 @@ async fn patch_task_marks_completion_and_moves_to_inbox() {
             status: ProjectStatus::Active,
             tags: vec![],
             color: "#8a6a44".to_string(),
+        workdir_path: None,
         })
         .await
         .expect("project");
@@ -157,6 +218,7 @@ async fn patch_event_preserves_linked_task() {
             status: ProjectStatus::Active,
             tags: vec![],
             color: "#6b4d8c".to_string(),
+        workdir_path: None,
         })
         .await
         .expect("project");
@@ -233,6 +295,76 @@ async fn patch_event_preserves_linked_task() {
 }
 
 #[tokio::test]
+async fn project_status_and_path_resolution_endpoints_reflect_linked_directories() {
+    let service = service().await;
+    let temp = tempdir().expect("tempdir");
+    let repo_root = temp.path().join("workspace");
+    let nested = repo_root.join("nested");
+    let leaf = nested.join("src");
+    std::fs::create_dir_all(&leaf).expect("nested path");
+
+    let parent = service
+        .create_project(CreateProjectRequest {
+            name: "Workspace".to_string(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            tags: vec![],
+            color: "#516b70".to_string(),
+            workdir_path: Some(repo_root.to_string_lossy().into_owned()),
+        })
+        .await
+        .expect("parent");
+    let child = service
+        .create_project(CreateProjectRequest {
+            name: "Nested".to_string(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            tags: vec![],
+            color: "#5a5f77".to_string(),
+            workdir_path: Some(nested.to_string_lossy().into_owned()),
+        })
+        .await
+        .expect("child");
+
+    let app = api::router(service);
+
+    let status_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/projects/{}/status", child.id))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(status_response.status(), StatusCode::OK);
+    let status: domain::ProjectRepoStatus = json(status_response).await;
+    assert_eq!(status.project_id, child.id);
+    assert_eq!(status.workdir_path.as_deref(), child.workdir_path.as_deref());
+    assert!(!status.is_git_repo);
+
+    let resolve_response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/projects/resolve-by-path?cwd={}",
+                    urlencoding::encode(&leaf.to_string_lossy())
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(resolve_response.status(), StatusCode::OK);
+    let resolved: domain::Project = json(resolve_response).await;
+    assert_eq!(resolved.id, child.id);
+    assert_ne!(resolved.id, parent.id);
+}
+
+#[tokio::test]
 async fn delete_event_preserves_task_and_normalizes_schedule() {
     let service = service().await;
     let project = service
@@ -242,6 +374,7 @@ async fn delete_event_preserves_task_and_normalizes_schedule() {
             status: ProjectStatus::Active,
             tags: vec![],
             color: "#335f57".to_string(),
+        workdir_path: None,
         })
         .await
         .expect("project");
@@ -309,6 +442,7 @@ async fn delete_task_removes_linked_events() {
             status: ProjectStatus::Active,
             tags: vec![],
             color: "#774b39".to_string(),
+        workdir_path: None,
         })
         .await
         .expect("project");
@@ -379,6 +513,7 @@ async fn delete_project_moves_tasks_to_inbox_and_unassigns_events() {
             status: ProjectStatus::Active,
             tags: vec![],
             color: "#34555e".to_string(),
+        workdir_path: None,
         })
         .await
         .expect("project");

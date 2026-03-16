@@ -41,10 +41,13 @@ pub fn router_with_health(service: ForgeService, health_response: HealthResponse
         .route("/today", get(today))
         .route("/calendar/range", get(calendar_range))
         .route("/projects", get(list_projects).post(create_project))
+        .route("/projects/statuses", get(list_project_statuses))
+        .route("/projects/resolve-by-path", get(resolve_project_by_path))
         .route(
             "/projects/{id}",
             get(get_project).patch(update_project).delete(delete_project),
         )
+        .route("/projects/{id}/status", get(get_project_status))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/clear-done", post(clear_done_tasks))
         .route(
@@ -69,6 +72,11 @@ pub fn router_with_health(service: ForgeService, health_response: HealthResponse
 #[derive(Debug, Deserialize)]
 struct ProjectListQuery {
     include_archived: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveProjectByPathQuery {
+    cwd: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +116,31 @@ async fn get_project(
     Path(id): Path<i64>,
 ) -> ApiResult<impl IntoResponse> {
     Ok(Json(state.service.get_project(id).await?))
+}
+
+async fn list_project_statuses(
+    State(state): State<SharedState>,
+    Query(query): Query<ProjectListQuery>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(
+        state.service
+            .list_project_statuses(query.include_archived.unwrap_or(false))
+            .await?,
+    ))
+}
+
+async fn get_project_status(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.service.get_project_status(id).await?))
+}
+
+async fn resolve_project_by_path(
+    State(state): State<SharedState>,
+    Query(query): Query<ResolveProjectByPathQuery>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.service.resolve_project_by_path(&query.cwd).await?))
 }
 
 async fn create_project(

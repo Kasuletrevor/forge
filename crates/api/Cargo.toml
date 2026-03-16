@@ -19,3 +19,4 @@ tracing.workspace = true
 persistence-sqlite = { path = "../persistence-sqlite" }
 tempfile.workspace = true
 tower = { version = "0.5.2", features = ["util"] }
+urlencoding.workspace = true

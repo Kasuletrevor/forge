@@ -8,6 +8,7 @@ import type {
   FocusState,
   HealthResponse,
   Project,
+  ProjectRepoStatus,
   ProjectSummary,
   SetFocusRequest,
   Task,
@@ -79,6 +80,15 @@ export const forgeApi = {
   },
   listProjects(baseUrl: string) {
     return request<ProjectSummary[]>(baseUrl, '/projects')
+  },
+  listProjectStatuses(baseUrl: string, includeArchived = false) {
+    return request<ProjectRepoStatus[]>(
+      baseUrl,
+      `/projects/statuses${buildQuery({ include_archived: includeArchived })}`,
+    )
+  },
+  getProjectStatus(baseUrl: string, id: number) {
+    return request<ProjectRepoStatus>(baseUrl, `/projects/${id}/status`)
   },
   createProject(baseUrl: string, payload: CreateProjectRequest) {
     return request<Project>(baseUrl, '/projects', {

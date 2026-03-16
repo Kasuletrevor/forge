@@ -80,6 +80,7 @@ import type {
   EventType,
   HealthResponse,
   Project,
+  ProjectRepoStatus,
   ProjectStatus,
   Task,
   TaskListQuery,
@@ -99,6 +100,7 @@ interface ProjectEditorState {
   color: string
   status: ProjectStatus
   tags: string
+  workdir_path: string
 }
 
 interface TaskEditorState {
@@ -201,6 +203,45 @@ function parseTags(input: string) {
     .filter(Boolean)
 }
 
+async function pickLocalDirectory() {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) {
+    throw new Error('Native directory picker is only available in the desktop app.')
+  }
+  const { invoke } = await import('@tauri-apps/api/core')
+  return await invoke<string | null>('pick_directory')
+}
+
+function summarizeProjectRepoStatus(status: ProjectRepoStatus | undefined) {
+  if (!status?.workdir_path) {
+    return {
+      eyebrow: 'Unlinked',
+      detail: 'No local workdir linked',
+      tone: 'neutral' as const,
+    }
+  }
+  if (status.status_error) {
+    return {
+      eyebrow: 'Linked',
+      detail: status.status_error,
+      tone: 'warning' as const,
+    }
+  }
+  if (!status.is_git_repo) {
+    return {
+      eyebrow: 'Linked',
+      detail: 'Directory linked, not a git repo',
+      tone: 'neutral' as const,
+    }
+  }
+  return {
+    eyebrow: status.branch ?? 'Detached',
+    detail: status.dirty
+      ? `${status.dirty_file_count} local change${status.dirty_file_count === 1 ? '' : 's'}`
+      : 'Working tree clean',
+    tone: status.dirty ? ('warning' as const) : ('healthy' as const),
+  }
+}
+
 export default function App() {
   const queryClient = useQueryClient()
   const { toast } = useToast()
@@ -232,6 +273,7 @@ export default function App() {
     status: 'active',
     tags: [],
     color: '#6f8466',
+    workdir_path: null,
   })
   const [taskForm, setTaskForm] = useState<CreateTaskRequest>({
     title: '',
@@ -295,6 +337,12 @@ export default function App() {
     queryFn: () => forgeApi.listProjects(apiBaseUrl),
   })
 
+  const projectStatusesQuery = useQuery({
+    queryKey: ['project-statuses', apiBaseUrl],
+    queryFn: () => forgeApi.listProjectStatuses(apiBaseUrl, true),
+    enabled: Boolean(apiBaseUrl) && !startupError,
+  })
+
   const tasksQuery = useQuery({
     queryKey: ['tasks', apiBaseUrl, projectFilter, statusFilter, deferredTaskSearch],
     queryFn: () => {
@@ -341,6 +389,10 @@ export default function App() {
   const projectMap = useMemo(
     () => new Map(projectSummaries.map((summary) => [summary.project.id, summary.project])),
     [projectSummaries],
+  )
+  const projectStatusMap = useMemo(
+    () => new Map((projectStatusesQuery.data ?? []).map((status) => [status.project_id, status])),
+    [projectStatusesQuery.data],
   )
 
   const unscheduledTasks = useMemo(
@@ -392,7 +444,14 @@ export default function App() {
   const createProject = useMutation({
     mutationFn: (payload: CreateProjectRequest) => forgeApi.createProject(apiBaseUrl, payload),
     onSuccess: async () => {
-      setProjectForm({ ...projectForm, name: '', description: '' })
+      setProjectForm({
+        name: '',
+        description: '',
+        status: 'active',
+        tags: [],
+        color: projectForm.color,
+        workdir_path: null,
+      })
       setIsCreateProjectOpen(false)
       await invalidate()
     },
@@ -712,6 +771,7 @@ export default function App() {
       color: project.color,
       status: project.status,
       tags: project.tags.join(', '),
+      workdir_path: project.workdir_path ?? '',
     })
   }
 
@@ -756,6 +816,7 @@ export default function App() {
     if (!projectEditor) {
       return
     }
+    const nextWorkdir = projectEditor.workdir_path.trim()
     updateProject.mutate({
       id: projectEditor.id,
       payload: {
@@ -764,8 +825,32 @@ export default function App() {
         status: projectEditor.status,
         tags: parseTags(projectEditor.tags),
         color: projectEditor.color,
+        workdir_path: nextWorkdir ? nextWorkdir : null,
       },
     })
+  }
+
+  async function handleProjectDirectoryPick(mode: 'create' | 'edit') {
+    try {
+      const selected = await pickLocalDirectory()
+      if (!selected) {
+        return
+      }
+      if (mode === 'create') {
+        setProjectForm((current) => ({ ...current, workdir_path: selected }))
+        return
+      }
+      setProjectEditor((current) =>
+        current
+          ? {
+              ...current,
+              workdir_path: selected,
+            }
+          : current,
+      )
+    } catch (error) {
+      notifyError('Failed to pick project folder', error)
+    }
   }
 
   function saveTaskEditor() {
@@ -1216,6 +1301,7 @@ export default function App() {
                               <span key={tag} className="rounded-full bg-forge-paper px-3 py-1">{tag}</span>
                             ))}
                           </div>
+                          <ProjectRepoCard status={projectStatusMap.get(summary.project.id)} />
                           <div className="mt-4 grid grid-cols-2 gap-3">
                             <Stat label="Open" value={String(summary.open_task_count)} />
                             <Stat label="Upcoming" value={String(summary.upcoming_event_count)} />
@@ -1568,6 +1654,13 @@ export default function App() {
           <div className="space-y-4">
             <Field label="Name" value={projectForm.name} onChange={(value) => setProjectForm({ ...projectForm, name: value })} autoFocus />
             <Field label="Description" value={projectForm.description} onChange={(value) => setProjectForm({ ...projectForm, description: value })} multiline />
+            <DirectoryField
+              label="Linked Workdir"
+              value={projectForm.workdir_path ?? ''}
+              onChange={(value) => setProjectForm({ ...projectForm, workdir_path: value.trim() ? value : null })}
+              onBrowse={() => void handleProjectDirectoryPick('create')}
+              onClear={() => setProjectForm({ ...projectForm, workdir_path: null })}
+            />
             <ColorPicker label="Color" value={projectForm.color} onChange={(value) => setProjectForm({ ...projectForm, color: value })} />
             <div className="flex justify-end gap-3 mt-4">
               <button className="forge-button forge-button-muted" onClick={() => setIsCreateProjectOpen(false)} type="button">Cancel</button>
@@ -1589,7 +1682,15 @@ export default function App() {
               <Field label="Description" value={projectEditor.description} onChange={(value) => setProjectEditor({ ...projectEditor, description: value })} multiline />
               <Select label="Status" value={projectEditor.status} onChange={(value) => setProjectEditor({ ...projectEditor, status: value as ProjectStatus })} options={projectStatuses.map((status) => ({ value: status, label: status }))} />
               <Field label="Tags" value={projectEditor.tags} onChange={(value) => setProjectEditor({ ...projectEditor, tags: value })} placeholder="infra, backend" />
+              <DirectoryField
+                label="Linked Workdir"
+                value={projectEditor.workdir_path}
+                onChange={(value) => setProjectEditor({ ...projectEditor, workdir_path: value })}
+                onBrowse={() => void handleProjectDirectoryPick('edit')}
+                onClear={() => setProjectEditor({ ...projectEditor, workdir_path: '' })}
+              />
               <ColorPicker label="Color" value={projectEditor.color} onChange={(value) => setProjectEditor({ ...projectEditor, color: value })} />
+              <ProjectRepoPanel status={projectStatusMap.get(projectEditor.id)} />
               <div className="flex justify-end gap-3 mt-4">
                 <button className="forge-button forge-button-muted" onClick={() => { setProjectEditor(null); restoreShellFocus() }} type="button">Cancel</button>
                 <button className="forge-button" onClick={saveProjectEditor} type="button">Save project</button>
@@ -1847,6 +1948,46 @@ function Field({
   )
 }
 
+function DirectoryField({
+  label,
+  value,
+  onChange,
+  onBrowse,
+  onClear,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  onBrowse: () => void
+  onClear: () => void
+}) {
+  return (
+    <label className="block space-y-2 text-sm font-medium text-forge-night/80">
+      <span>{label}</span>
+      <div className="flex gap-2">
+        <input
+          className="forge-input flex-1"
+          type="text"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder="C:\\Users\\Trevor\\workspace\\Forge"
+        />
+        <button className="forge-button forge-button-muted whitespace-nowrap" onClick={onBrowse} type="button">
+          Browse
+        </button>
+        {value ? (
+          <button className="forge-button forge-button-muted whitespace-nowrap" onClick={onClear} type="button">
+            Clear
+          </button>
+        ) : null}
+      </div>
+      <p className="text-xs uppercase tracking-[0.16em] text-forge-steel">
+        Link a local directory so Forge can resolve repo context and shell location.
+      </p>
+    </label>
+  )
+}
+
 function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (value: string) => void; options: Array<{ value: string; label: string }> }) {
   return (
     <label className="block space-y-2 text-sm font-medium text-forge-night/80">
@@ -1871,11 +2012,64 @@ function Empty({ label, compact = false }: { label: string; compact?: boolean })
   )
 }
 
+function ProjectRepoCard({ status }: { status?: ProjectRepoStatus }) {
+  const summary = summarizeProjectRepoStatus(status)
+  const toneClass =
+    summary.tone === 'healthy'
+      ? 'border-[#bed2bf] bg-[#eef5ed] text-[#284634]'
+      : summary.tone === 'warning'
+        ? 'border-[#dec3a6] bg-[#f8ede2] text-[#6b3d16]'
+        : 'border-forge-steel/20 bg-white text-forge-night/80'
+
+  return (
+    <div className={`mt-4 rounded-[20px] border px-4 py-3 ${toneClass}`}>
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[11px] uppercase tracking-[0.24em]">{summary.eyebrow}</span>
+        {status?.workdir_path ? (
+          <span className="text-[11px] uppercase tracking-[0.2em]">
+            {status.is_git_repo ? 'Repo linked' : 'Folder linked'}
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-2 text-sm font-medium">{summary.detail}</div>
+      <div className="mt-2 truncate text-xs uppercase tracking-[0.16em]">
+        {status?.workdir_path ?? 'Attach a workdir to enable repo-aware context'}
+      </div>
+    </div>
+  )
+}
+
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-white/5 px-3 py-3">
       <div className="text-[11px] uppercase tracking-[0.25em] text-forge-steel">{label}</div>
       <div className="mt-2 text-lg font-semibold text-white">{value}</div>
+    </div>
+  )
+}
+
+function ProjectRepoPanel({ status }: { status?: ProjectRepoStatus }) {
+  const summary = summarizeProjectRepoStatus(status)
+  const rows = [
+    { label: 'State', value: summary.eyebrow },
+    { label: 'Path', value: status?.workdir_path ?? 'Not linked' },
+    { label: 'Branch', value: status?.branch ?? (status?.is_git_repo ? 'Detached' : 'Unavailable') },
+    { label: 'Remote', value: status?.remote_url ?? 'Unavailable' },
+    { label: 'Last commit', value: status?.last_commit_summary ?? 'Unavailable' },
+  ]
+
+  return (
+    <div className="rounded-[24px] border border-forge-steel/20 bg-[#f7f2ea] p-4">
+      <div className="text-[11px] uppercase tracking-[0.24em] text-forge-steel">Repo Status</div>
+      <div className="mt-2 text-sm text-forge-night/75">{summary.detail}</div>
+      <div className="mt-4 space-y-3">
+        {rows.map((row) => (
+          <div key={row.label} className="flex items-start justify-between gap-3 text-sm">
+            <span className="text-forge-night/65">{row.label}</span>
+            <span className="max-w-[18rem] text-right font-medium text-forge-night">{row.value}</span>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

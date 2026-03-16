@@ -12,9 +12,9 @@ use chrono::{Days, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use domain::{
     CalendarOccurrence, CreateEventRequest, CreateProjectRequest, CreateTaskRequest, Event,
-    EventListQuery, FocusState, ForgePaths, HealthResponse, Project, ProjectStatus,
-    ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus, TodaySummary,
-    UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
+    EventListQuery, FocusState, ForgePaths, HealthResponse, Project, ProjectRepoStatus,
+    ProjectStatus, ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus,
+    TodaySummary, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
     DEFAULT_API_PORT, default_project_color, parse_rfc3339,
 };
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
@@ -62,7 +62,10 @@ enum ProjectCommand {
     Add(ProjectAddArgs),
     List,
     Show(ProjectRefArg),
+    Status(ProjectStatusArgs),
     Edit(ProjectEditArgs),
+    Link(ProjectLinkArgs),
+    Unlink(ProjectUnlinkArgs),
     Delete(ProjectDeleteArgs),
 }
 
@@ -73,6 +76,8 @@ struct ProjectAddArgs {
     description: String,
     #[arg(long, default_value_t = default_project_color())]
     color: String,
+    #[arg(long = "path")]
+    workdir_path: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -95,6 +100,26 @@ struct ProjectEditArgs {
     tags: Vec<String>,
     #[arg(long)]
     clear_tags: bool,
+    #[arg(long = "path")]
+    workdir_path: Option<String>,
+    #[arg(long)]
+    clear_path: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProjectStatusArgs {
+    project: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ProjectLinkArgs {
+    project: String,
+    path: String,
+}
+
+#[derive(Debug, Args)]
+struct ProjectUnlinkArgs {
+    project: String,
 }
 
 #[derive(Debug, Args)]
@@ -357,9 +382,17 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
                     status: ProjectStatus::Active,
                     tags: Vec::new(),
                     color: args.color,
+                    workdir_path: args
+                        .workdir_path
+                        .as_deref()
+                        .map(resolve_cli_workdir_path)
+                        .transpose()?,
                 })
                 .await?;
             println!("[{}] {} ({})", project.id, project.name, project.slug);
+            if let Some(workdir_path) = &project.workdir_path {
+                println!("workdir: {workdir_path}");
+            }
         }
         Commands::Project {
             command: ProjectCommand::List,
@@ -388,6 +421,22 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
             if !project.tags.is_empty() {
                 println!("tags: {}", project.tags.join(", "));
             }
+            if let Some(workdir_path) = &project.workdir_path {
+                println!("workdir: {workdir_path}");
+            }
+        }
+        Commands::Project {
+            command: ProjectCommand::Status(args),
+        } => {
+            let project = match args.project.as_deref() {
+                Some(reference) => api.resolve_project(reference).await?,
+                None => api
+                    .resolve_project_from_cwd()
+                    .await?
+                    .ok_or_else(|| anyhow!("no linked project matches the current working directory"))?,
+            };
+            let status = api.get_project_status(project.id).await?;
+            print_project_status(&project, &status);
         }
         Commands::Project {
             command: ProjectCommand::Edit(args),
@@ -399,9 +448,54 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
                 status: args.status.as_deref().map(parse_json_enum).transpose()?,
                 tags: tags_update(args.tags, args.clear_tags),
                 color: args.color,
+                workdir_path: if args.clear_path {
+                    Some(None)
+                } else {
+                    args.workdir_path
+                        .as_deref()
+                        .map(resolve_cli_workdir_path)
+                        .transpose()?
+                        .map(Some)
+                },
             };
             ensure_project_patch(&payload)?;
             let updated = api.update_project(project.id, payload).await?;
+            println!("[{}] {} ({})", updated.id, updated.name, updated.slug);
+            if let Some(workdir_path) = &updated.workdir_path {
+                println!("workdir: {workdir_path}");
+            }
+        }
+        Commands::Project {
+            command: ProjectCommand::Link(args),
+        } => {
+            let project = api.resolve_project(&args.project).await?;
+            let updated = api
+                .update_project(
+                    project.id,
+                    UpdateProjectRequest {
+                        workdir_path: Some(Some(resolve_cli_workdir_path(&args.path)?)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            println!("[{}] {} ({})", updated.id, updated.name, updated.slug);
+            if let Some(workdir_path) = &updated.workdir_path {
+                println!("workdir: {workdir_path}");
+            }
+        }
+        Commands::Project {
+            command: ProjectCommand::Unlink(args),
+        } => {
+            let project = api.resolve_project(&args.project).await?;
+            let updated = api
+                .update_project(
+                    project.id,
+                    UpdateProjectRequest {
+                        workdir_path: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             println!("[{}] {} ({})", updated.id, updated.name, updated.slug);
         }
         Commands::Project {
@@ -423,7 +517,7 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         } => {
             let project_id = match args.project {
                 Some(reference) => Some(api.resolve_project(&reference).await?.id),
-                None => None,
+                None => api.resolve_project_from_cwd().await?.map(|project| project.id),
             };
             let task = api
                 .create_task(CreateTaskRequest {
@@ -567,7 +661,7 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         } => {
             let project_id = match args.project {
                 Some(reference) => Some(api.resolve_project(&reference).await?.id),
-                None => None,
+                None => api.resolve_project_from_cwd().await?.map(|project| project.id),
             };
             let event = api
                 .create_event(CreateEventRequest {
@@ -1148,6 +1242,24 @@ impl ForgeApi {
             })
             .ok_or_else(|| anyhow!("project '{reference}' not found"))
     }
+
+    async fn resolve_project_from_cwd(&self) -> Result<Option<Project>> {
+        let cwd = env::current_dir().context("failed to resolve current working directory")?;
+        self.resolve_project_by_path(&cwd).await
+    }
+
+    async fn resolve_project_by_path(&self, cwd: &Path) -> Result<Option<Project>> {
+        self.get_json_optional(&format!(
+            "/projects/resolve-by-path?cwd={}",
+            urlencoding::encode(&cwd.to_string_lossy())
+        ))
+        .await
+    }
+
+    async fn get_project_status(&self, id: i64) -> Result<ProjectRepoStatus> {
+        self.get_json(&format!("/projects/{id}/status")).await
+    }
+
     async fn create_project(&self, payload: CreateProjectRequest) -> Result<Project> {
         self.post_json("/projects", &payload).await
     }
@@ -1254,6 +1366,18 @@ impl ForgeApi {
             .json()
             .await
             .map_err(Into::into)
+    }
+
+    async fn get_json_optional<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<Option<T>> {
+        let response = self
+            .client
+            .get(format!("{}{}", self.base_url, path))
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(response.error_for_status()?.json().await?))
     }
 
     async fn post_json<T: serde::de::DeserializeOwned, B: Serialize>(
@@ -1526,10 +1650,116 @@ fn ensure_project_patch(payload: &UpdateProjectRequest) -> Result<()> {
         && payload.status.is_none()
         && payload.tags.is_none()
         && payload.color.is_none()
+        && payload.workdir_path.is_none()
     {
         bail!("no project fields supplied")
     }
     Ok(())
+}
+
+fn resolve_cli_workdir_path(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        bail!("project path must not be empty");
+    }
+
+    let expanded = expand_cli_home_path(trimmed);
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        env::current_dir()
+            .context("failed to resolve current working directory")?
+            .join(expanded)
+    };
+
+    let canonical = absolute
+        .canonicalize()
+        .with_context(|| format!("failed to resolve project path {}", absolute.display()))?;
+
+    if !canonical.is_dir() {
+        bail!("project path is not a directory: {}", canonical.display());
+    }
+
+    Ok(display_cli_path(&canonical))
+}
+
+fn expand_cli_home_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return cli_home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
+        if let Some(home) = cli_home_dir() {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(raw)
+}
+
+fn cli_home_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
+        env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let drive = env::var_os("HOMEDRIVE")?;
+                let path = env::var_os("HOMEPATH")?;
+                let mut home = PathBuf::from(drive);
+                home.push(path);
+                Some(home)
+            })
+    } else {
+        env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+fn display_cli_path(path: &Path) -> String {
+    let value = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+    } else {
+        value
+    }
+}
+
+fn print_project_status(project: &Project, status: &ProjectRepoStatus) {
+    println!("Project: {}", project.name);
+    println!();
+    println!(
+        "Path: {}",
+        status.workdir_path.as_deref().unwrap_or("(not linked)")
+    );
+    println!("Git repo: {}", if status.is_git_repo { "yes" } else { "no" });
+    if let Some(repo_root) = &status.repo_root {
+        println!("Repo root: {repo_root}");
+    }
+    if let Some(branch) = &status.branch {
+        println!("Branch: {branch}");
+    }
+    if let Some(remote_url) = &status.remote_url {
+        println!("Remote: {remote_url}");
+    }
+    if let Some(default_branch) = &status.default_branch {
+        println!("Default branch: {default_branch}");
+    }
+    println!(
+        "Dirty: {}",
+        if status.dirty {
+            format!("yes ({})", status.dirty_file_count)
+        } else {
+            "no".to_string()
+        }
+    );
+    if let Some(commit) = &status.last_commit_sha {
+        println!("Last commit: {commit}");
+    }
+    if let Some(summary) = &status.last_commit_summary {
+        println!("Last summary: {summary}");
+    }
+    if let Some(at) = &status.last_commit_at {
+        println!("Last commit at: {at}");
+    }
+    if let Some(error) = &status.status_error {
+        println!("Status error: {error}");
+    }
 }
 
 fn ensure_task_patch(payload: &UpdateTaskRequest) -> Result<()> {
@@ -1693,6 +1923,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#6f8466".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1743,6 +1974,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#7b5b41".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1817,6 +2049,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#5a4c7b".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1906,6 +2139,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#46645b".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -1979,6 +2213,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#7a5137".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -2052,6 +2287,7 @@ mod tests {
                 status: ProjectStatus::Active,
                 tags: vec![],
                 color: "#446274".to_string(),
+            workdir_path: None,
             })
             .await
             .expect("project");
@@ -2111,6 +2347,89 @@ mod tests {
             .expect("event after delete");
         assert_eq!(refreshed_task.project_id, None);
         assert_eq!(refreshed_event.project_id, None);
+    }
+
+    #[tokio::test]
+    async fn project_link_and_unlink_commands_manage_workdir_path() {
+        let harness = harness().await;
+        let temp = tempdir().expect("tempdir");
+        let workdir = temp.path().join("linked-repo");
+        std::fs::create_dir_all(&workdir).expect("workdir");
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Linked".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#617055".to_string(),
+                workdir_path: None,
+            })
+            .await
+            .expect("project");
+        let project_id = project.id.to_string();
+
+        run(
+            ForgeCli::parse_from([
+                "forge",
+                "project",
+                "link",
+                project_id.as_str(),
+                workdir.to_string_lossy().as_ref(),
+            ]),
+            &harness.api,
+        )
+        .await
+        .expect("run project link");
+
+        let linked = harness
+            .service
+            .get_project(project.id)
+            .await
+            .expect("project after link");
+        assert!(linked.workdir_path.is_some());
+
+        run(
+            ForgeCli::parse_from(["forge", "project", "unlink", project_id.as_str()]),
+            &harness.api,
+        )
+        .await
+        .expect("run project unlink");
+
+        let unlinked = harness
+            .service
+            .get_project(project.id)
+            .await
+            .expect("project after unlink");
+        assert_eq!(unlinked.workdir_path, None);
+    }
+
+    #[tokio::test]
+    async fn project_status_command_runs_against_linked_directory_state() {
+        let harness = harness().await;
+        let temp = tempdir().expect("tempdir");
+        let workdir = temp.path().join("workspace");
+        std::fs::create_dir_all(&workdir).expect("workspace");
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Workspace".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#556870".to_string(),
+                workdir_path: Some(workdir.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("project");
+        let project_id = project.id.to_string();
+
+        run(
+            ForgeCli::parse_from(["forge", "project", "status", project_id.as_str()]),
+            &harness.api,
+        )
+        .await
+        .expect("run project status");
     }
 
     #[test]
