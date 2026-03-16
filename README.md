@@ -233,6 +233,7 @@ Forge is intended to feel like a fast operational console rather than a generic 
 
 - [SPEC.md](SPEC.md)
 - [PRD.md](PRD.md)
+- [CHANGELOG.md](CHANGELOG.md)
 - [stack.md](stack.md)
 - [docs/installing.md](docs/installing.md)
 - [docs/releasing.md](docs/releasing.md)

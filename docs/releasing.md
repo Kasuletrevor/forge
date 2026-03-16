@@ -24,13 +24,15 @@ Before tagging a release, keep these versions in sync:
 - workspace version in `Cargo.toml`
 - desktop version in `apps/desktop/package.json`
 - desktop bundle version in `apps/desktop/src-tauri/tauri.conf.json`
+- the matching section in `CHANGELOG.md`
 
 The release workflow checks this before building tagged releases.
 
 ## Cutting a Release
 
 1. Ensure `main` is green.
-2. Create a tag that matches the Forge version:
+2. Add a changelog entry for the exact release version in `CHANGELOG.md`.
+3. Create a tag that matches the Forge version:
 
 ```powershell
 git tag -a v0.1.0 -m "Release 0.1.0"
@@ -43,6 +45,7 @@ git push origin v0.1.0
    - desktop portable `.zip`
    - CLI `.zip`
    - `SHA256SUMS.txt`
+   - release notes pulled from the matching `CHANGELOG.md` section
 
 ## Dry-Run Artifact Testing
 
@@ -97,3 +100,4 @@ For every release, verify:
 - Windows SmartScreen warnings are expected until signing is added.
 - This workflow is Windows-first; macOS and Linux packaging are out of scope for the current release phase.
 - `forge update` should continue to target the stable `forge-v<version>-windows-x64-cli.zip` asset and validate it against `SHA256SUMS.txt`.
+- The release workflow no longer uses GitHub-generated notes; it reads the exact matching version section from `CHANGELOG.md`.

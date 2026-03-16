@@ -257,6 +257,28 @@ jobs:
           name: forge-desktop-windows-x64
           path: dist
 
+      - name: Prepare changelog release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${{ needs.tag-check.outputs.release_version }}"
+          notes_file="$(mktemp)"
+          awk -v version="${version}" '
+            $0 ~ "^## \\[" version "\\]" { capture = 1 }
+            capture && $0 ~ "^## \\[" version "\\]" { print; next }
+            capture && $0 ~ "^## \\[" && $0 !~ "^## \\[" version "\\]" { exit }
+            capture { print }
+          ' CHANGELOG.md > "${notes_file}"
+
+          if [[ ! -s "${notes_file}" ]]; then
+            echo "Failed to locate changelog entry for ${version} in CHANGELOG.md"
+            exit 1
+          fi
+
+          echo "notes_file=${notes_file}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -291,7 +313,8 @@ jobs:
             "${GH_REPO}"
             --title
             "Forge ${version}"
-            --generate-notes
+            --notes-file
+            "${{ steps.notes.outputs.notes_file }}"
           )
 
           if [[ "${prerelease}" == "true" ]]; then
