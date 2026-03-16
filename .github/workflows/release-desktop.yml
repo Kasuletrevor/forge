@@ -162,32 +162,51 @@ jobs:
           $cliZip = Join-Path $PWD "apps\desktop\dist\release\forge-v${{ needs.tag-check.outputs.release_version }}-windows-x64-cli.zip"
           $extractDir = Join-Path $env:RUNNER_TEMP "forge-cli"
           $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Forge\bin"
-          $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          $forgeExe = Join-Path $installRoot "forge.exe"
+          $daemonLog = Join-Path $env:USERPROFILE ".forge\logs\forged.log"
 
           Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
           Expand-Archive -Path $cliZip -DestinationPath $extractDir -Force
           & (Join-Path $extractDir "install-cli.ps1")
 
-          if (-not (Test-Path (Join-Path $installRoot "forge.exe"))) {
+          if (-not (Test-Path $forgeExe)) {
             throw "CLI installer did not place forge.exe in $installRoot"
           }
 
-          if (-not (($userPath = [Environment]::GetEnvironmentVariable("Path", "User")) -split ";" | Where-Object { $_ -eq $installRoot })) {
+          if (-not (([Environment]::GetEnvironmentVariable("Path", "User")) -split ";" | Where-Object { $_ -eq $installRoot })) {
             throw "Forge CLI install root was not added to the user PATH"
           }
 
-          $env:Path = "$([Environment]::GetEnvironmentVariable('Path', 'User'));$([Environment]::GetEnvironmentVariable('Path', 'Machine'))"
-          $version = & forge --version
+          $version = & $forgeExe --version
           if ($version -notmatch "^forge ") {
             throw "Expected forge --version to succeed after CLI install, got: $version"
           }
 
-          $today = & forge today
-          if ($today -notmatch "^Today ") {
-            throw "Expected forge today to succeed after CLI install, got: $today"
+          $todayOut = Join-Path $env:RUNNER_TEMP "forge-today.out"
+          $todayErr = Join-Path $env:RUNNER_TEMP "forge-today.err"
+          Remove-Item -Force $todayOut, $todayErr -ErrorAction SilentlyContinue
+          $todayProcess = Start-Process -FilePath $forgeExe -ArgumentList "today" -RedirectStandardOutput $todayOut -RedirectStandardError $todayErr -PassThru
+
+          if (-not $todayProcess.WaitForExit(20000)) {
+            Stop-Process -Id $todayProcess.Id -Force
+            if (Test-Path $daemonLog) {
+              Write-Host "Forge daemon log tail:"
+              Get-Content $daemonLog -Tail 200
+            }
+            throw "forge today did not complete within 20 seconds after CLI install"
           }
 
-          $doctor = (& forge doctor) -join "`n"
+          $today = Get-Content $todayOut -Raw
+          if ($todayProcess.ExitCode -ne 0) {
+            $stderr = if (Test-Path $todayErr) { Get-Content $todayErr -Raw } else { "" }
+            throw "forge today exited with code $($todayProcess.ExitCode). stdout: $today stderr: $stderr"
+          }
+          if ($today -notmatch "^Today ") {
+            $stderr = if (Test-Path $todayErr) { Get-Content $todayErr -Raw } else { "" }
+            throw "Expected forge today to succeed after CLI install, got stdout: $today stderr: $stderr"
+          }
+
+          $doctor = (& $forgeExe doctor) -join "`n"
           if ($doctor -notmatch "(?m)^Forge Environment Check$") {
             throw "Expected forge doctor to succeed after CLI install, got: $doctor"
           }
@@ -200,11 +219,12 @@ jobs:
         run: |
           $installer = Join-Path $PWD "apps\desktop\dist\release\forge-v${{ needs.tag-check.outputs.release_version }}-windows-x64-setup.exe"
           $installRoot = Join-Path $env:LOCALAPPDATA "Programs\Forge\bin"
+          $forgeExe = Join-Path $installRoot "forge.exe"
 
           Get-Process forge-desktop,Forge,forged -ErrorAction SilentlyContinue | Stop-Process -Force
           Start-Process -FilePath $installer -ArgumentList "/S" -Wait
 
-          if (-not (Test-Path (Join-Path $installRoot "forge.exe"))) {
+          if (-not (Test-Path $forgeExe)) {
             throw "Desktop installer did not provision forge.exe in $installRoot"
           }
 
@@ -212,13 +232,12 @@ jobs:
             throw "Desktop installer did not add the Forge CLI path to the user PATH"
           }
 
-          $env:Path = "$([Environment]::GetEnvironmentVariable('Path', 'User'));$([Environment]::GetEnvironmentVariable('Path', 'Machine'))"
-          $version = & forge --version
+          $version = & $forgeExe --version
           if ($version -notmatch "^forge ") {
             throw "Expected forge --version after desktop install, got: $version"
           }
 
-          $doctor = (& forge doctor) -join "`n"
+          $doctor = (& $forgeExe doctor) -join "`n"
           if ($doctor -notmatch "(?m)^Forge Environment Check$") {
             throw "Expected forge doctor after desktop install, got: $doctor"
           }
