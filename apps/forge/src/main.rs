@@ -12,9 +12,10 @@ use chrono::{Days, Local, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use clap::{Args, Parser, Subcommand};
 use domain::{
     CalendarOccurrence, CreateEventRequest, CreateProjectRequest, CreateTaskRequest, Event,
-    EventListQuery, FocusState, ForgePaths, HealthResponse, Project, ProjectRepoStatus,
-    ProjectStatus, ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus,
-    TodaySummary, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
+    EventListQuery, FocusState, ForgePaths, HealthResponse, ImportProjectsRequest,
+    ImportProjectsResponse, Project, ProjectRepoStatus, ProjectStatus, ProjectSummary,
+    SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus, TodaySummary,
+    UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
     DEFAULT_API_PORT, default_project_color, parse_rfc3339,
 };
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
@@ -60,6 +61,7 @@ enum Commands {
 #[derive(Debug, Subcommand)]
 enum ProjectCommand {
     Add(ProjectAddArgs),
+    Import(ProjectImportArgs),
     List,
     Show(ProjectRefArg),
     Status(ProjectStatusArgs),
@@ -83,6 +85,11 @@ struct ProjectAddArgs {
 #[derive(Debug, Args)]
 struct ProjectRefArg {
     project: String,
+}
+
+#[derive(Debug, Args)]
+struct ProjectImportArgs {
+    path: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -393,6 +400,21 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
             if let Some(workdir_path) = &project.workdir_path {
                 println!("workdir: {workdir_path}");
             }
+        }
+        Commands::Project {
+            command: ProjectCommand::Import(args),
+        } => {
+            let root_path = match args.path.as_deref() {
+                Some(path) => resolve_cli_workdir_path(path)?,
+                None => env::current_dir()
+                    .context("failed to resolve current working directory")?
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            let imported = api
+                .import_projects(ImportProjectsRequest { root_path })
+                .await?;
+            print_project_import_result(&imported);
         }
         Commands::Project {
             command: ProjectCommand::List,
@@ -1264,6 +1286,10 @@ impl ForgeApi {
         self.post_json("/projects", &payload).await
     }
 
+    async fn import_projects(&self, payload: ImportProjectsRequest) -> Result<ImportProjectsResponse> {
+        self.post_json("/projects/import", &payload).await
+    }
+
     async fn update_project(&self, id: i64, payload: UpdateProjectRequest) -> Result<Project> {
         self.patch_json(&format!("/projects/{id}"), &payload).await
     }
@@ -1759,6 +1785,59 @@ fn print_project_status(project: &Project, status: &ProjectRepoStatus) {
     }
     if let Some(error) = &status.status_error {
         println!("Status error: {error}");
+    }
+}
+
+fn print_project_import_result(result: &ImportProjectsResponse) {
+    println!("Workspace import");
+    println!("root: {}", result.root_path);
+    println!("discovered repos: {}", result.discovered_repos);
+    println!(
+        "created: {}  linked: {}  skipped: {}",
+        result.created.len(),
+        result.linked.len(),
+        result.skipped.len()
+    );
+
+    if !result.created.is_empty() {
+        println!("\nCreated");
+        for project in &result.created {
+            println!(
+                "[{}] {} ({}){}",
+                project.id,
+                project.name,
+                project.slug,
+                project
+                    .workdir_path
+                    .as_deref()
+                    .map(|path| format!("  {path}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+
+    if !result.linked.is_empty() {
+        println!("\nLinked Existing");
+        for project in &result.linked {
+            println!(
+                "[{}] {} ({}){}",
+                project.id,
+                project.name,
+                project.slug,
+                project
+                    .workdir_path
+                    .as_deref()
+                    .map(|path| format!("  {path}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+
+    if !result.skipped.is_empty() {
+        println!("\nSkipped");
+        for skipped in &result.skipped {
+            println!("{}  {}  {}", skipped.name, skipped.path, skipped.reason);
+        }
     }
 }
 
@@ -2430,6 +2509,57 @@ mod tests {
         )
         .await
         .expect("run project status");
+    }
+
+    #[tokio::test]
+    async fn project_import_command_creates_and_links_repo_projects() {
+        let harness = harness().await;
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let existing_repo = workspace.join("existing");
+        let fresh_repo = workspace.join("fresh");
+        std::fs::create_dir_all(existing_repo.join(".git")).expect("existing git marker");
+        std::fs::create_dir_all(fresh_repo.join(".git")).expect("fresh git marker");
+
+        let existing_project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "Existing".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#617055".to_string(),
+                workdir_path: None,
+            })
+            .await
+            .expect("existing project");
+
+        run(
+            ForgeCli::parse_from([
+                "forge",
+                "project",
+                "import",
+                workspace.to_string_lossy().as_ref(),
+            ]),
+            &harness.api,
+        )
+        .await
+        .expect("run project import");
+
+        let linked_existing = harness
+            .service
+            .get_project(existing_project.id)
+            .await
+            .expect("linked existing project");
+        assert!(linked_existing.workdir_path.is_some());
+
+        let projects = harness
+            .service
+            .list_projects(true)
+            .await
+            .expect("projects after import");
+        assert_eq!(projects.len(), 2);
+        assert!(projects.iter().any(|summary| summary.project.name == "fresh"));
     }
 
     #[test]
