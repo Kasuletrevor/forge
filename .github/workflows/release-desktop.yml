@@ -90,6 +90,12 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -108,6 +114,8 @@ jobs:
         run: npm run verify:version --prefix apps/desktop
 
       - name: Build desktop release assets
+        # Cold Windows packaging is still expensive; this cache mainly pays off on reruns
+        # and nearby commits by reusing Cargo dependencies and compiled artifacts.
         run: npm run build:release --prefix apps/desktop
         env:
           FORGE_RELEASE_VERSION: ${{ needs.tag-check.outputs.release_version }}
