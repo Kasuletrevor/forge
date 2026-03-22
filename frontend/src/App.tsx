@@ -79,6 +79,7 @@ import type {
   EventRecord,
   EventType,
   HealthResponse,
+  ImportProjectsResponse,
   Project,
   ProjectRepoStatus,
   ProjectStatus,
@@ -307,6 +308,9 @@ export default function App() {
   )
   const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null)
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false)
+  const [isImportProjectsOpen, setIsImportProjectsOpen] = useState(false)
+  const [projectImportRoot, setProjectImportRoot] = useState('')
+  const [projectImportResult, setProjectImportResult] = useState<ImportProjectsResponse | null>(null)
   const [taskEditor, setTaskEditor] = useState<TaskEditorState | null>(null)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false)
   const [eventEditor, setEventEditor] = useState<EventEditorState | null>(null)
@@ -467,6 +471,18 @@ export default function App() {
       await invalidate()
     },
     onError: (error) => notifyError('Failed to update project', error),
+  })
+
+  const importProjects = useMutation({
+    mutationFn: (rootPath: string) =>
+      forgeApi.importProjects(apiBaseUrl, {
+        root_path: rootPath,
+      }),
+    onSuccess: async (result) => {
+      setProjectImportResult(result)
+      await invalidate()
+    },
+    onError: (error) => notifyError('Failed to import workspace projects', error),
   })
 
   const deleteProject = useMutation({
@@ -851,6 +867,30 @@ export default function App() {
     } catch (error) {
       notifyError('Failed to pick project folder', error)
     }
+  }
+
+  async function handleImportDirectoryPick() {
+    try {
+      const selected = await pickLocalDirectory()
+      if (selected) {
+        setProjectImportRoot(selected)
+      }
+    } catch (error) {
+      notifyError('Failed to pick workspace folder', error)
+    }
+  }
+
+  function submitProjectImport() {
+    const root = projectImportRoot.trim()
+    if (!root) {
+      toast({
+        title: 'Workspace root required',
+        description: 'Select or enter a workspace directory to import repos from.',
+        variant: 'destructive',
+      })
+      return
+    }
+    importProjects.mutate(root)
   }
 
   function saveTaskEditor() {
@@ -1254,7 +1294,18 @@ export default function App() {
               {screen === 'projects' && (
                 <div className="grid gap-5">
                   <Section title="Active Surfaces" eyebrow="Projects">
-                    <div className="flex justify-end mb-4">
+                    <div className="mb-4 flex justify-end gap-3">
+                      <button
+                        className="forge-button forge-button-muted"
+                        onClick={() => {
+                          setProjectImportResult(null)
+                          setProjectImportRoot('')
+                          setIsImportProjectsOpen(true)
+                        }}
+                        type="button"
+                      >
+                        Import Workspace
+                      </button>
                       <button className="forge-button bg-forge-night text-white border-none" onClick={() => setIsCreateProjectOpen(true)} type="button">New Project</button>
                     </div>
                     <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -1665,6 +1716,109 @@ export default function App() {
             <div className="flex justify-end gap-3 mt-4">
               <button className="forge-button forge-button-muted" onClick={() => setIsCreateProjectOpen(false)} type="button">Cancel</button>
               <button className="forge-button" onClick={() => createProject.mutate(projectForm)} type="button">Create project</button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isImportProjectsOpen}
+        onOpenChange={(open) => {
+          setIsImportProjectsOpen(open)
+          if (!open) {
+            restoreShellFocus()
+          }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Import Workspace Repos</DialogTitle>
+            <DialogDescription>
+              Scan a workspace root for git repositories and create or link Forge projects through the daemon API.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <DirectoryField
+              label="Workspace Root"
+              value={projectImportRoot}
+              onChange={setProjectImportRoot}
+              onBrowse={() => void handleImportDirectoryPick()}
+              onClear={() => setProjectImportRoot('')}
+            />
+            {projectImportResult ? (
+              <div className="rounded-[24px] border border-forge-steel/20 bg-[#f8f4ed] p-4 text-sm text-forge-night/80">
+                <div className="text-xs uppercase tracking-[0.24em] text-forge-steel">Import Result</div>
+                <div className="mt-2 font-medium text-forge-night">{projectImportResult.root_path}</div>
+                <div className="mt-3 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.2em] text-forge-steel">
+                  <span className="rounded-full bg-white px-3 py-1">
+                    discovered {projectImportResult.discovered_repos}
+                  </span>
+                  <span className="rounded-full bg-white px-3 py-1">
+                    created {projectImportResult.created.length}
+                  </span>
+                  <span className="rounded-full bg-white px-3 py-1">
+                    linked {projectImportResult.linked.length}
+                  </span>
+                  <span className="rounded-full bg-white px-3 py-1">
+                    skipped {projectImportResult.skipped.length}
+                  </span>
+                </div>
+                {projectImportResult.created.length > 0 ? (
+                  <div className="mt-4">
+                    <div className="text-xs uppercase tracking-[0.22em] text-forge-steel">Created</div>
+                    <div className="mt-2 space-y-2">
+                      {projectImportResult.created.map((project) => (
+                        <div key={`created-${project.id}`} className="rounded-2xl bg-white px-3 py-3">
+                          <div className="font-medium text-forge-night">{project.name}</div>
+                          <div className="mt-1 text-xs text-forge-steel">{project.workdir_path}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {projectImportResult.linked.length > 0 ? (
+                  <div className="mt-4">
+                    <div className="text-xs uppercase tracking-[0.22em] text-forge-steel">Linked Existing</div>
+                    <div className="mt-2 space-y-2">
+                      {projectImportResult.linked.map((project) => (
+                        <div key={`linked-${project.id}`} className="rounded-2xl bg-white px-3 py-3">
+                          <div className="font-medium text-forge-night">{project.name}</div>
+                          <div className="mt-1 text-xs text-forge-steel">{project.workdir_path}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {projectImportResult.skipped.length > 0 ? (
+                  <div className="mt-4">
+                    <div className="text-xs uppercase tracking-[0.22em] text-forge-steel">Skipped</div>
+                    <div className="mt-2 space-y-2">
+                      {projectImportResult.skipped.map((entry) => (
+                        <div key={`${entry.path}:${entry.reason}`} className="rounded-2xl bg-white px-3 py-3">
+                          <div className="font-medium text-forge-night">{entry.name}</div>
+                          <div className="mt-1 text-xs text-forge-steel">{entry.path}</div>
+                          <div className="mt-2 text-xs text-[#8f3424]">{entry.reason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="mt-4 flex justify-end gap-3">
+              <button
+                className="forge-button forge-button-muted"
+                onClick={() => {
+                  setIsImportProjectsOpen(false)
+                  restoreShellFocus()
+                }}
+                type="button"
+              >
+                Close
+              </button>
+              <button className="forge-button" onClick={submitProjectImport} type="button">
+                {importProjects.isPending ? 'Importing…' : 'Import repos'}
+              </button>
             </div>
           </div>
         </DialogContent>

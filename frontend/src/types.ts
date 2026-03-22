@@ -54,6 +54,24 @@ export interface ProjectRepoStatus {
   status_error: string | null
 }
 
+export interface ImportedProjectSkip {
+  path: string
+  name: string
+  reason: string
+}
+
+export interface ImportProjectsRequest {
+  root_path: string
+}
+
+export interface ImportProjectsResponse {
+  root_path: string
+  discovered_repos: number
+  created: Project[]
+  linked: Project[]
+  skipped: ImportedProjectSkip[]
+}
+
 export interface Task {
   id: number
   title: string
