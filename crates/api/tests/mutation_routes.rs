@@ -6,8 +6,8 @@ use axum::{
 use chrono::{Duration, Utc};
 use domain::{
     CreateEventRequest, CreateProjectRequest, CreateTaskRequest, EventType, ProjectStatus,
-    SourceKind, TaskPriority, TaskStatus, UpdateEventRequest, UpdateProjectRequest,
-    UpdateTaskRequest,
+    ImportProjectsRequest, SourceKind, TaskPriority, TaskStatus, UpdateEventRequest,
+    UpdateProjectRequest, UpdateTaskRequest,
 };
 use persistence_sqlite::SqliteStore;
 use tempfile::tempdir;
@@ -362,6 +362,55 @@ async fn project_status_and_path_resolution_endpoints_reflect_linked_directories
     let resolved: domain::Project = json(resolve_response).await;
     assert_eq!(resolved.id, child.id);
     assert_ne!(resolved.id, parent.id);
+}
+
+#[tokio::test]
+async fn import_projects_endpoint_creates_and_links_repo_projects() {
+    let service = service().await;
+    let temp = tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    let existing_repo = workspace.join("existing");
+    let fresh_repo = workspace.join("fresh");
+    std::fs::create_dir_all(existing_repo.join(".git")).expect("existing git marker");
+    std::fs::create_dir_all(fresh_repo.join(".git")).expect("fresh git marker");
+
+    let existing = service
+        .create_project(CreateProjectRequest {
+            name: "Existing".to_string(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            tags: vec![],
+            color: "#516b70".to_string(),
+            workdir_path: None,
+        })
+        .await
+        .expect("existing project");
+
+    let app = api::router(service.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/projects/import")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&ImportProjectsRequest {
+                        root_path: workspace.to_string_lossy().into_owned(),
+                    })
+                    .expect("payload"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: domain::ImportProjectsResponse = json(response).await;
+    assert_eq!(payload.discovered_repos, 2);
+    assert_eq!(payload.created.len(), 1);
+    assert_eq!(payload.linked.len(), 1);
+    assert_eq!(payload.linked[0].id, existing.id);
+    assert!(payload.skipped.is_empty());
 }
 
 #[tokio::test]

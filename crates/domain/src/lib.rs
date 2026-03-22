@@ -124,6 +124,27 @@ pub struct ProjectRepoStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportProjectsRequest {
+    pub root_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportedProjectSkip {
+    pub path: String,
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportProjectsResponse {
+    pub root_path: String,
+    pub discovered_repos: usize,
+    pub created: Vec<Project>,
+    pub linked: Vec<Project>,
+    pub skipped: Vec<ImportedProjectSkip>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: i64,
     pub title: String,

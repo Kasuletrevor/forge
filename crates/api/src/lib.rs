@@ -10,8 +10,9 @@ use axum::{
 };
 use domain::{
     CalendarRangeQuery, CreateEventRequest, CreateProjectRequest, CreateTaskRequest, EventListQuery,
-    ForgePaths, HealthResponse, SetFocusRequest, TaskListQuery, UpdateEventRequest,
-    UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST, DEFAULT_API_PORT,
+    ForgePaths, HealthResponse, ImportProjectsRequest, SetFocusRequest, TaskListQuery,
+    UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, DEFAULT_API_HOST,
+    DEFAULT_API_PORT,
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -41,6 +42,7 @@ pub fn router_with_health(service: ForgeService, health_response: HealthResponse
         .route("/today", get(today))
         .route("/calendar/range", get(calendar_range))
         .route("/projects", get(list_projects).post(create_project))
+        .route("/projects/import", post(import_projects))
         .route("/projects/statuses", get(list_project_statuses))
         .route("/projects/resolve-by-path", get(resolve_project_by_path))
         .route(
@@ -148,6 +150,13 @@ async fn create_project(
     Json(payload): Json<CreateProjectRequest>,
 ) -> ApiResult<impl IntoResponse> {
     Ok((StatusCode::CREATED, Json(state.service.create_project(payload).await?)))
+}
+
+async fn import_projects(
+    State(state): State<SharedState>,
+    Json(payload): Json<ImportProjectsRequest>,
+) -> ApiResult<impl IntoResponse> {
+    Ok(Json(state.service.import_projects(payload).await?))
 }
 
 async fn update_project(
