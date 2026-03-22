@@ -2,6 +2,8 @@ import type {
   CalendarOccurrence,
   CalendarRangeQuery,
   CreateEventRequest,
+  ImportProjectsRequest,
+  ImportProjectsResponse,
   CreateProjectRequest,
   CreateTaskRequest,
   EventRecord,
@@ -92,6 +94,12 @@ export const forgeApi = {
   },
   createProject(baseUrl: string, payload: CreateProjectRequest) {
     return request<Project>(baseUrl, '/projects', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
+  importProjects(baseUrl: string, payload: ImportProjectsRequest) {
+    return request<ImportProjectsResponse>(baseUrl, '/projects/import', {
       method: 'POST',
       body: JSON.stringify(payload),
     })

@@ -10,13 +10,15 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz as ChronoTz;
 use domain::{
     CalendarOccurrence, CalendarRangeQuery, CreateEventRequest, CreateProjectRequest,
-    CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult, Project,
-    ProjectRepoStatus, ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery,
-    TaskStatus, TodaySummary, UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest,
-    ValidationError, parse_rfc3339, require_non_empty,
+    CreateTaskRequest, Event, EventListQuery, EventType, FocusState, ForgeResult,
+    ImportProjectsRequest, ImportProjectsResponse, ImportedProjectSkip, Project, ProjectRepoStatus,
+    ProjectSummary, SetFocusRequest, SourceKind, Task, TaskListQuery, TaskStatus, TodaySummary,
+    UpdateEventRequest, UpdateProjectRequest, UpdateTaskRequest, ValidationError,
+    default_project_color, parse_rfc3339, require_non_empty,
 };
 use persistence_sqlite::SqliteStore;
 use rrule::{RRuleSet, Tz};
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -130,6 +132,112 @@ impl ForgeService {
             .create_project(&input)
             .await
             .map_err(Self::map_store_error)
+    }
+
+    #[instrument(skip(self, input))]
+    pub async fn import_projects(
+        &self,
+        input: ImportProjectsRequest,
+    ) -> AppResult<ImportProjectsResponse> {
+        let root = canonicalize_project_path(&input.root_path)?;
+        let root_display = path_to_display_string(&root);
+        let repo_roots = scan_workspace_repositories(&root);
+        let mut existing_projects: Vec<Project> = self
+            .list_projects(true)
+            .await?
+            .into_iter()
+            .map(|summary| summary.project)
+            .collect();
+        let mut linked_by_path = HashMap::new();
+        let mut taken_slugs = HashSet::new();
+
+        for project in &existing_projects {
+            taken_slugs.insert(project.slug.clone());
+            if let Some(workdir_path) = &project.workdir_path {
+                linked_by_path.insert(normalize_path_key(Path::new(workdir_path)), project.clone());
+            }
+        }
+
+        let mut created = Vec::new();
+        let mut linked = Vec::new();
+        let mut skipped = Vec::new();
+
+        for repo_root in &repo_roots {
+            let repo_display = path_to_display_string(repo_root);
+            let repo_key = normalize_path_key(repo_root);
+            let repo_name = import_repo_name(repo_root);
+
+            if let Some(project) = linked_by_path.get(&repo_key) {
+                skipped.push(ImportedProjectSkip {
+                    path: repo_display,
+                    name: repo_name,
+                    reason: format!("already linked to project '{}'", project.name),
+                });
+                continue;
+            }
+
+            if let Some(project) = find_unlinked_project_match(&existing_projects, &repo_name) {
+                match self
+                    .update_project(
+                        project.id,
+                        UpdateProjectRequest {
+                            workdir_path: Some(Some(repo_display.clone())),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(updated) => {
+                        linked_by_path.insert(repo_key, updated.clone());
+                        if let Some(existing) =
+                            existing_projects.iter_mut().find(|candidate| candidate.id == updated.id)
+                        {
+                            *existing = updated.clone();
+                        }
+                        linked.push(updated);
+                    }
+                    Err(error) => skipped.push(ImportedProjectSkip {
+                        path: repo_display,
+                        name: repo_name,
+                        reason: error.to_string(),
+                    }),
+                }
+                continue;
+            }
+
+            let project_name = next_import_project_name(repo_root, &taken_slugs);
+            match self
+                .create_project(CreateProjectRequest {
+                    name: project_name,
+                    description: String::new(),
+                    status: domain::ProjectStatus::Active,
+                    tags: Vec::new(),
+                    color: default_project_color(),
+                    workdir_path: Some(repo_display.clone()),
+                })
+                .await
+            {
+                Ok(project) => {
+                    taken_slugs.insert(project.slug.clone());
+                    linked_by_path.insert(repo_key, project.clone());
+                    existing_projects.push(project.clone());
+                    created.push(project);
+                }
+                Err(error) => skipped.push(ImportedProjectSkip {
+                    path: repo_display,
+                    name: repo_name,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+
+        Ok(ImportProjectsResponse {
+            root_path: root_display,
+            discovered_repos: repo_roots.len(),
+            created,
+            linked,
+            skipped,
+        })
     }
 
     #[instrument(skip(self, input))]
@@ -706,6 +814,100 @@ fn normalize_path_key(path: &Path) -> String {
 
 fn path_key_has_ancestor(path: &str, ancestor: &str) -> bool {
     path == ancestor || path.starts_with(&format!("{ancestor}{}", std::path::MAIN_SEPARATOR))
+}
+
+fn scan_workspace_repositories(root: &Path) -> Vec<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut repos = Vec::new();
+
+    while let Some(directory) = stack.pop() {
+        if is_git_repository_root(&directory) {
+            repos.push(directory);
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+
+        let mut children = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            children.push(entry.path());
+        }
+
+        children.sort();
+        children.reverse();
+        stack.extend(children);
+    }
+
+    repos.sort();
+    repos
+}
+
+fn is_git_repository_root(directory: &Path) -> bool {
+    let marker = directory.join(".git");
+    marker.is_dir() || marker.is_file()
+}
+
+fn import_repo_name(repo_root: &Path) -> String {
+    repo_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Imported Project")
+        .to_string()
+}
+
+fn find_unlinked_project_match(projects: &[Project], repo_name: &str) -> Option<Project> {
+    let repo_slug = domain::slugify(repo_name);
+    projects
+        .iter()
+        .find(|project| {
+            project.workdir_path.is_none()
+                && (project.slug == repo_slug || project.name.eq_ignore_ascii_case(repo_name))
+        })
+        .cloned()
+}
+
+fn next_import_project_name(repo_root: &Path, taken_slugs: &HashSet<String>) -> String {
+    let base_name = import_repo_name(repo_root);
+    let parent_name = repo_root
+        .parent()
+        .and_then(|value| value.file_name())
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string);
+
+    let mut candidates = vec![base_name.clone()];
+    if let Some(parent_name) = parent_name {
+        candidates.push(format!("{base_name} ({parent_name})"));
+    }
+
+    for candidate in candidates {
+        let slug = domain::slugify(&candidate);
+        if !slug.is_empty() && !taken_slugs.contains(&slug) {
+            return candidate;
+        }
+    }
+
+    for suffix in 2.. {
+        let candidate = format!("{base_name} {suffix}");
+        let slug = domain::slugify(&candidate);
+        if !slug.is_empty() && !taken_slugs.contains(&slug) {
+            return candidate;
+        }
+    }
+
+    unreachable!("numeric suffix generation should always find an unused slug")
 }
 
 fn inspect_project_repo(project: &Project) -> ProjectRepoStatus {
@@ -1770,5 +1972,88 @@ mod tests {
         assert_eq!(status.branch, None);
         assert_eq!(status.repo_root, None);
         assert_eq!(status.status_error, None);
+    }
+
+    #[tokio::test]
+    async fn importing_workspace_repos_creates_and_links_projects() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let existing_repo = workspace.join("existing");
+        let fresh_repo = workspace.join("fresh");
+        std::fs::create_dir_all(existing_repo.join(".git")).expect("existing git marker");
+        std::fs::create_dir_all(fresh_repo.join(".git")).expect("fresh git marker");
+
+        let existing_project = service
+            .create_project(CreateProjectRequest {
+                name: "Existing".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#556b5f".to_string(),
+                workdir_path: None,
+            })
+            .await
+            .expect("existing project");
+
+        let imported = service
+            .import_projects(ImportProjectsRequest {
+                root_path: workspace.to_string_lossy().into_owned(),
+            })
+            .await
+            .expect("import result");
+
+        assert_eq!(imported.discovered_repos, 2);
+        assert_eq!(imported.created.len(), 1);
+        assert_eq!(imported.created[0].name, "fresh");
+        assert_eq!(imported.linked.len(), 1);
+        assert_eq!(imported.linked[0].id, existing_project.id);
+        assert!(imported.skipped.is_empty());
+
+        let linked_existing = service
+            .get_project(existing_project.id)
+            .await
+            .expect("linked existing project");
+        assert_eq!(
+            linked_existing.workdir_path.as_deref(),
+            Some(path_to_display_string(&existing_repo).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn importing_workspace_repos_skips_existing_link_and_derives_unique_names() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let linked_repo = workspace.join("alpha");
+        let duplicate_name_repo = workspace.join("nested").join("alpha");
+        std::fs::create_dir_all(linked_repo.join(".git")).expect("linked git marker");
+        std::fs::create_dir_all(duplicate_name_repo.join(".git")).expect("duplicate git marker");
+
+        let linked_project = service
+            .create_project(CreateProjectRequest {
+                name: "Alpha".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#4f6a77".to_string(),
+                workdir_path: Some(linked_repo.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("linked project");
+
+        let imported = service
+            .import_projects(ImportProjectsRequest {
+                root_path: workspace.to_string_lossy().into_owned(),
+            })
+            .await
+            .expect("import result");
+
+        assert_eq!(imported.discovered_repos, 2);
+        assert_eq!(imported.created.len(), 1);
+        assert_eq!(imported.created[0].name, "alpha (nested)");
+        assert!(imported.linked.is_empty());
+        assert_eq!(imported.skipped.len(), 1);
+        assert!(imported.skipped[0].reason.contains(&linked_project.name));
     }
 }
