@@ -684,7 +684,7 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         Commands::Event {
             command: EventCommand::List(args),
         } => {
-            let current_project = if args.project.is_none() && !args.all {
+            let current_project = if should_infer_event_project_context(&args) {
                 api.resolve_project_from_cwd().await?
             } else {
                 None
@@ -1569,6 +1569,10 @@ fn build_event_list_query(args: &EventListArgs, project_id: Option<i64>) -> Resu
         project_id: if args.all { None } else { project_id },
         linked_task_id: args.task,
     })
+}
+
+fn should_infer_event_project_context(args: &EventListArgs) -> bool {
+    args.project.is_none() && !args.all && args.task.is_none()
 }
 
 fn format_current_project_line(current_project: Option<&Project>) -> Option<String> {
@@ -2567,6 +2571,20 @@ mod tests {
         )
         .expect("global query");
         assert_eq!(global.project_id, None);
+    }
+
+    #[test]
+    fn event_list_context_is_not_inferred_when_task_scope_is_explicit() {
+        assert!(!should_infer_event_project_context(&EventListArgs {
+            project: None,
+            all: false,
+            task: Some(42),
+        }));
+        assert!(should_infer_event_project_context(&EventListArgs {
+            project: None,
+            all: false,
+            task: None,
+        }));
     }
 
     #[test]
