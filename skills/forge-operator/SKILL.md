@@ -1,6 +1,6 @@
 ---
 name: forge-operator
-description: Operate Forge correctly through its CLI and daemon model. Use when an agent needs to create, inspect, update, schedule, or delete Forge projects, tasks, events, or focus state; link projects to local workdirs; use cwd-based project context; run `forge doctor` or `forge update`; or explain how Forge behaves as a local-first work operating system.
+description: "Operate Forge correctly through its CLI and daemon model. Use when an agent needs to create, inspect, update, schedule, or delete Forge projects, tasks, events, or focus state; link projects to local workdirs; use cwd-based project context; run `forge doctor` or `forge update`; or explain how Forge behaves as a local-first work operating system."
 ---
 
 # Forge Operator
