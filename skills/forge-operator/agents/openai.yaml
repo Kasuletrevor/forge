@@ -1,0 +1,4 @@
+interface:
+  display_name: "Forge Operator"
+  short_description: "Use Forge safely through its CLI"
+  default_prompt: "Use $forge-operator to operate Forge through its CLI and daemon model."
