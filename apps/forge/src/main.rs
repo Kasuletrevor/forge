@@ -162,6 +162,8 @@ struct TaskListArgs {
     #[arg(long)]
     project: Option<String>,
     #[arg(long)]
+    all: bool,
+    #[arg(long)]
     inbox: bool,
     #[arg(long)]
     status: Option<String>,
@@ -254,6 +256,8 @@ struct EventListArgs {
     #[arg(long)]
     project: Option<String>,
     #[arg(long)]
+    all: bool,
+    #[arg(long)]
     task: Option<i64>,
 }
 
@@ -301,7 +305,7 @@ enum FocusCommand {
 #[derive(Debug, Args)]
 struct FocusSetArgs {
     #[arg(long)]
-    project: String,
+    project: Option<String>,
     #[arg(long)]
     task: Option<i64>,
 }
@@ -368,7 +372,10 @@ async fn run_local_command(command: Commands) -> Result<()> {
 
 async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
     match command {
-        Commands::Today => print_today(&api.get_today().await?),
+        Commands::Today => {
+            let current_project = api.resolve_project_from_cwd().await?;
+            print_today(&api.get_today().await?, current_project.as_ref());
+        }
         Commands::Update(_) | Commands::Doctor => {
             bail!("local command was routed through the daemon-backed command path")
         }
@@ -430,10 +437,7 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         } => {
             let project = match args.project.as_deref() {
                 Some(reference) => api.resolve_project(reference).await?,
-                None => api
-                    .resolve_project_from_cwd()
-                    .await?
-                    .ok_or_else(|| anyhow!("no linked project matches the current working directory"))?,
+                None => require_context_project(api, "project status").await?,
             };
             let status = api.get_project_status(project.id).await?;
             print_project_status(&project, &status);
@@ -552,21 +556,18 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         Commands::Task {
             command: TaskCommand::List(args),
         } => {
-            let project_id = match args.project {
-                Some(reference) => Some(api.resolve_project(&reference).await?.id),
-                None => None,
+            let current_project = if args.project.is_none() && !args.all && !args.inbox {
+                api.resolve_project_from_cwd().await?
+            } else {
+                None
             };
+            let project_id = match args.project.as_deref() {
+                Some(reference) => Some(api.resolve_project(reference).await?.id),
+                None => current_project.as_ref().map(|project| project.id),
+            };
+            let query = build_task_list_query(&args, project_id)?;
             let tasks = api
-                .list_tasks(TaskListQuery {
-                    project_id,
-                    inbox_only: if args.inbox { Some(true) } else { None },
-                    status: args.status.as_deref().map(parse_json_enum).transpose()?,
-                    priority: None,
-                    due_today: None,
-                    overdue: if args.overdue { Some(true) } else { None },
-                    scheduled: if args.scheduled { Some(true) } else { None },
-                    search: None,
-                })
+                .list_tasks(query)
                 .await?;
             print_tasks(&tasks);
         }
@@ -683,15 +684,18 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         Commands::Event {
             command: EventCommand::List(args),
         } => {
+            let current_project = if should_infer_event_project_context(&args) {
+                api.resolve_project_from_cwd().await?
+            } else {
+                None
+            };
             let project_id = match args.project.as_deref() {
                 Some(reference) => Some(api.resolve_project(reference).await?.id),
-                None => None,
+                None => current_project.as_ref().map(|project| project.id),
             };
+            let query = build_event_list_query(&args, project_id)?;
             let events = api
-                .list_events(EventListQuery {
-                    project_id,
-                    linked_task_id: args.task,
-                })
+                .list_events(query)
                 .await?;
             print_events(&events);
         }
@@ -764,7 +768,10 @@ async fn run_api_command(command: Commands, api: &ForgeApi) -> Result<()> {
         Commands::Focus {
             command: FocusCommand::Set(args),
         } => {
-            let project = api.resolve_project(&args.project).await?;
+            let project = match args.project.as_deref() {
+                Some(reference) => api.resolve_project(reference).await?,
+                None => require_context_project(api, "focus set").await?,
+            };
             let focus = api
                 .set_focus(SetFocusRequest {
                     project_id: project.id,
@@ -1530,8 +1537,53 @@ fn format_startup_failure(paths: &ForgePaths, health_url: &str, exit_status: Opt
         paths.database.display()
     )
 }
-fn print_today(summary: &TodaySummary) {
+async fn require_context_project(api: &ForgeApi, action: &str) -> Result<Project> {
+    api.resolve_project_from_cwd()
+        .await?
+        .ok_or_else(|| anyhow!("no linked project matches the current working directory for {action}"))
+}
+
+fn build_task_list_query(args: &TaskListArgs, project_id: Option<i64>) -> Result<TaskListQuery> {
+    if args.all && (args.project.is_some() || args.inbox) {
+        bail!("use either --all, --project, or --inbox, not multiple scope selectors");
+    }
+
+    Ok(TaskListQuery {
+        project_id: if args.all || args.inbox { None } else { project_id },
+        inbox_only: if args.inbox { Some(true) } else { None },
+        status: args.status.as_deref().map(parse_json_enum).transpose()?,
+        priority: None,
+        due_today: None,
+        overdue: if args.overdue { Some(true) } else { None },
+        scheduled: if args.scheduled { Some(true) } else { None },
+        search: None,
+    })
+}
+
+fn build_event_list_query(args: &EventListArgs, project_id: Option<i64>) -> Result<EventListQuery> {
+    if args.all && args.project.is_some() {
+        bail!("use either --all or --project, not both");
+    }
+
+    Ok(EventListQuery {
+        project_id: if args.all { None } else { project_id },
+        linked_task_id: args.task,
+    })
+}
+
+fn should_infer_event_project_context(args: &EventListArgs) -> bool {
+    args.project.is_none() && !args.all && args.task.is_none()
+}
+
+fn format_current_project_line(current_project: Option<&Project>) -> Option<String> {
+    current_project.map(|project| format!("Current Project: {} ({})", project.name, project.slug))
+}
+
+fn print_today(summary: &TodaySummary, current_project: Option<&Project>) {
     println!("Today {}", summary.date);
+    if let Some(current_project) = format_current_project_line(current_project) {
+        println!("{current_project}");
+    }
     print_focus(&summary.focus);
     println!();
     println!("Tasks");
@@ -1864,8 +1916,9 @@ mod tests {
     use axum::serve;
     use domain::{CreateEventRequest, CreateProjectRequest, CreateTaskRequest, EventType, TaskPriority};
     use persistence_sqlite::SqliteStore;
+    use std::sync::OnceLock;
     use tempfile::tempdir;
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
     struct TestHarness {
         service: ForgeService,
@@ -1910,6 +1963,11 @@ mod tests {
             api,
             server,
         }
+    }
+
+    fn cwd_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[tokio::test]
@@ -2430,6 +2488,183 @@ mod tests {
         )
         .await
         .expect("run project status");
+    }
+
+    #[test]
+    fn task_list_query_uses_detected_context_unless_all_or_inbox_is_selected() {
+        let project = Project {
+            id: 41,
+            name: "SLAM-LLM".to_string(),
+            slug: "slam-llm".to_string(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            tags: vec![],
+            color: "#516b70".to_string(),
+            workdir_path: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        let contextual = build_task_list_query(
+            &TaskListArgs {
+                project: None,
+                all: false,
+                inbox: false,
+                status: Some("todo".to_string()),
+                overdue: false,
+                scheduled: false,
+            },
+            Some(project.id),
+        )
+        .expect("contextual query");
+        assert_eq!(contextual.project_id, Some(project.id));
+
+        let global = build_task_list_query(
+            &TaskListArgs {
+                project: None,
+                all: true,
+                inbox: false,
+                status: None,
+                overdue: false,
+                scheduled: false,
+            },
+            Some(project.id),
+        )
+        .expect("global query");
+        assert_eq!(global.project_id, None);
+
+        let conflict = build_task_list_query(
+            &TaskListArgs {
+                project: Some("slam-llm".to_string()),
+                all: true,
+                inbox: false,
+                status: None,
+                overdue: false,
+                scheduled: false,
+            },
+            Some(project.id),
+        )
+        .expect_err("conflicting scope flags should fail");
+        assert!(conflict.to_string().contains("--all"));
+    }
+
+    #[test]
+    fn event_list_query_uses_detected_context_and_can_escape_with_all() {
+        let contextual = build_event_list_query(
+            &EventListArgs {
+                project: None,
+                all: false,
+                task: None,
+            },
+            Some(19),
+        )
+        .expect("contextual query");
+        assert_eq!(contextual.project_id, Some(19));
+
+        let global = build_event_list_query(
+            &EventListArgs {
+                project: None,
+                all: true,
+                task: None,
+            },
+            Some(19),
+        )
+        .expect("global query");
+        assert_eq!(global.project_id, None);
+    }
+
+    #[test]
+    fn event_list_context_is_not_inferred_when_task_scope_is_explicit() {
+        assert!(!should_infer_event_project_context(&EventListArgs {
+            project: None,
+            all: false,
+            task: Some(42),
+        }));
+        assert!(should_infer_event_project_context(&EventListArgs {
+            project: None,
+            all: false,
+            task: None,
+        }));
+    }
+
+    #[test]
+    fn current_project_line_formats_name_and_slug() {
+        let project = Project {
+            id: 9,
+            name: "LearningKav".to_string(),
+            slug: "learningkav".to_string(),
+            description: String::new(),
+            status: ProjectStatus::Active,
+            tags: vec![],
+            color: "#556870".to_string(),
+            workdir_path: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        assert_eq!(
+            format_current_project_line(Some(&project)).as_deref(),
+            Some("Current Project: LearningKav (learningkav)")
+        );
+        assert_eq!(format_current_project_line(None), None);
+    }
+
+    #[tokio::test]
+    async fn focus_set_command_can_infer_project_from_cwd() {
+        let _guard = cwd_lock().lock().await;
+        let original_cwd = env::current_dir().expect("original cwd");
+        let harness = harness().await;
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("dsi-tb");
+        let leaf = repo_root.join("scripts");
+        std::fs::create_dir_all(&leaf).expect("repo path");
+        let project = harness
+            .service
+            .create_project(CreateProjectRequest {
+                name: "DSI-TB".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#617055".to_string(),
+                workdir_path: Some(repo_root.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("project");
+
+        env::set_current_dir(&leaf).expect("set cwd");
+        let result = run(
+            ForgeCli::parse_from(["forge", "focus", "set"]),
+            &harness.api,
+        )
+        .await;
+        env::set_current_dir(original_cwd).expect("restore cwd");
+
+        result.expect("run focus set");
+        let focus = harness.service.get_focus().await.expect("focus").expect("active focus");
+        assert_eq!(focus.project_id, project.id);
+    }
+
+    #[tokio::test]
+    async fn focus_set_without_context_returns_clear_error() {
+        let _guard = cwd_lock().lock().await;
+        let original_cwd = env::current_dir().expect("original cwd");
+        let harness = harness().await;
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("plain-folder");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+
+        env::set_current_dir(&workspace).expect("set cwd");
+        let error = run(
+            ForgeCli::parse_from(["forge", "focus", "set"]),
+            &harness.api,
+        )
+        .await
+        .expect_err("focus set should fail without context");
+        env::set_current_dir(original_cwd).expect("restore cwd");
+
+        assert!(error
+            .to_string()
+            .contains("no linked project matches the current working directory"));
     }
 
     #[test]

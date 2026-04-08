@@ -98,25 +98,16 @@ impl ForgeService {
     #[instrument(skip(self, cwd))]
     pub async fn resolve_project_by_path(&self, cwd: &str) -> AppResult<Project> {
         let resolved_cwd = canonicalize_project_path(cwd)?;
-        let cwd_key = normalize_path_key(&resolved_cwd);
         let projects = self.list_projects(true).await?;
+        let project_list: Vec<Project> = projects.into_iter().map(|summary| summary.project).collect();
 
-        projects
-            .into_iter()
-            .map(|summary| summary.project)
-            .filter_map(|project| {
-                let workdir = project.workdir_path.as_ref()?;
-                let project_root = PathBuf::from(workdir);
-                let project_key = normalize_path_key(&project_root);
-                if path_key_has_ancestor(&cwd_key, &project_key) {
-                    Some((project_root.components().count(), project))
-                } else {
-                    None
-                }
-            })
-            .max_by_key(|(depth, _)| *depth)
-            .map(|(_, project)| project)
-            .ok_or(AppError::NotFound("project"))
+        if let Some(git_root) = resolve_git_root(&resolved_cwd) {
+            if let Some(project) = match_project_for_exact_path(&project_list, &git_root) {
+                return Ok(project);
+            }
+        }
+
+        match_project_for_path(&project_list, &resolved_cwd).ok_or(AppError::NotFound("project"))
     }
 
     #[instrument(skip(self, input))]
@@ -706,6 +697,39 @@ fn normalize_path_key(path: &Path) -> String {
 
 fn path_key_has_ancestor(path: &str, ancestor: &str) -> bool {
     path == ancestor || path.starts_with(&format!("{ancestor}{}", std::path::MAIN_SEPARATOR))
+}
+
+fn match_project_for_path(projects: &[Project], path: &Path) -> Option<Project> {
+    let path_key = normalize_path_key(path);
+    projects
+        .iter()
+        .filter_map(|project| {
+            let workdir = project.workdir_path.as_ref()?;
+            let project_root = PathBuf::from(workdir);
+            let project_key = normalize_path_key(&project_root);
+            if path_key_has_ancestor(&path_key, &project_key) {
+                Some((project_root.components().count(), project.clone()))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(depth, _)| *depth)
+        .map(|(_, project)| project)
+}
+
+fn match_project_for_exact_path(projects: &[Project], path: &Path) -> Option<Project> {
+    let path_key = normalize_path_key(path);
+    projects.iter().find_map(|project| {
+        let workdir = project.workdir_path.as_ref()?;
+        let project_root = PathBuf::from(workdir);
+        let project_key = normalize_path_key(&project_root);
+        (project_key == path_key).then(|| project.clone())
+    })
+}
+
+fn resolve_git_root(path: &Path) -> Option<PathBuf> {
+    let output = run_git_command(path, &["rev-parse", "--show-toplevel"]).ok()?;
+    canonicalize_project_path(&output).ok()
 }
 
 fn inspect_project_repo(project: &Project) -> ProjectRepoStatus {
@@ -1741,6 +1765,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_project_by_path_prefers_git_root_match_before_raw_nested_path() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("slam-llm");
+        let nested_project_root = repo_root.join("experiments");
+        let leaf = nested_project_root.join("train");
+        std::fs::create_dir_all(&leaf).expect("nested repo path");
+        init_git_repo(&repo_root);
+
+        let repo_project = service
+            .create_project(CreateProjectRequest {
+                name: "SLAM-LLM".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#516b70".to_string(),
+                workdir_path: Some(repo_root.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("repo project");
+        let nested_project = service
+            .create_project(CreateProjectRequest {
+                name: "SLAM Experiments".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#6a6f53".to_string(),
+                workdir_path: Some(nested_project_root.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("nested project");
+
+        let resolved = service
+            .resolve_project_by_path(&leaf.to_string_lossy())
+            .await
+            .expect("resolved project");
+
+        assert_eq!(resolved.id, repo_project.id);
+        assert_ne!(resolved.id, nested_project.id);
+    }
+
+    #[tokio::test]
+    async fn resolve_project_by_path_falls_back_to_raw_path_when_git_root_has_no_project_match() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let repo_root = temp.path().join("learningkav");
+        let linked_subdir = repo_root.join("backend");
+        let leaf = linked_subdir.join("src");
+        std::fs::create_dir_all(&leaf).expect("nested repo path");
+        init_git_repo(&repo_root);
+
+        let subdir_project = service
+            .create_project(CreateProjectRequest {
+                name: "LearningKav Backend".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#556b5f".to_string(),
+                workdir_path: Some(linked_subdir.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("subdir project");
+
+        let resolved = service
+            .resolve_project_by_path(&leaf.to_string_lossy())
+            .await
+            .expect("resolved project");
+
+        assert_eq!(resolved.id, subdir_project.id);
+    }
+
+    #[tokio::test]
+    async fn resolve_project_by_path_does_not_let_git_root_prefer_broad_parent_links() {
+        let service = service().await;
+        let temp = tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let repo_root = workspace.join("slam-llm");
+        let linked_subdir = repo_root.join("backend");
+        let leaf = linked_subdir.join("src");
+        std::fs::create_dir_all(&leaf).expect("nested repo path");
+        init_git_repo(&repo_root);
+
+        let parent_project = service
+            .create_project(CreateProjectRequest {
+                name: "Workspace".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#6b7051".to_string(),
+                workdir_path: Some(workspace.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("parent project");
+        let nested_project = service
+            .create_project(CreateProjectRequest {
+                name: "Backend".to_string(),
+                description: String::new(),
+                status: ProjectStatus::Active,
+                tags: vec![],
+                color: "#516b70".to_string(),
+                workdir_path: Some(linked_subdir.to_string_lossy().into_owned()),
+            })
+            .await
+            .expect("nested project");
+
+        let resolved = service
+            .resolve_project_by_path(&leaf.to_string_lossy())
+            .await
+            .expect("resolved project");
+
+        assert_ne!(resolved.id, parent_project.id);
+        assert_eq!(resolved.id, nested_project.id);
+    }
+
+    #[tokio::test]
     async fn project_status_reports_linked_non_repo_directories_without_failing() {
         let service = service().await;
         let temp = tempdir().expect("tempdir");
@@ -1770,5 +1909,14 @@ mod tests {
         assert_eq!(status.branch, None);
         assert_eq!(status.repo_root, None);
         assert_eq!(status.status_error, None);
+    }
+
+    fn init_git_repo(path: &Path) {
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(path)
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init should succeed");
     }
 }
