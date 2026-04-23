@@ -1,5 +1,6 @@
 import * as React from 'react'
 import * as AlertDialogPrimitive from '@radix-ui/react-alert-dialog'
+import { motionPresets } from '../../lib/motion'
 import { cn } from '../../lib/utils'
 
 const AlertDialog = AlertDialogPrimitive.Root
@@ -13,6 +14,7 @@ const AlertDialogOverlay = React.forwardRef<
     ref={ref}
     className={cn(
       'fixed inset-0 z-50 bg-[#201b17]/45 backdrop-blur-[2px]',
+      motionPresets.overlayFade,
       className,
     )}
     {...props}
@@ -30,6 +32,7 @@ const AlertDialogContent = React.forwardRef<
       ref={ref}
       className={cn(
         'fixed left-[50%] top-[50%] z-50 grid w-[min(92vw,560px)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-[30px] border border-forge-steel/25 bg-[#f8f3eb] p-6 shadow-panel',
+        motionPresets.dialogEnter,
         className,
       )}
       {...props}
