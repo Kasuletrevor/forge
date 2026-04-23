@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { X } from 'lucide-react'
+import { motionPresets } from '../../lib/motion'
 import { cn } from '../../lib/utils'
 
 const Dialog = DialogPrimitive.Root
@@ -16,6 +17,7 @@ const DialogOverlay = React.forwardRef<
     ref={ref}
     className={cn(
       'fixed inset-0 z-50 bg-[#201b17]/45 backdrop-blur-[2px]',
+      motionPresets.overlayFade,
       className,
     )}
     {...props}
@@ -33,6 +35,7 @@ const DialogContent = React.forwardRef<
       ref={ref}
       className={cn(
         'fixed left-[50%] top-[50%] z-50 grid w-[min(92vw,760px)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-[30px] border border-forge-steel/25 bg-[#f8f3eb] p-6 shadow-panel',
+        motionPresets.dialogEnter,
         className,
       )}
       {...props}
