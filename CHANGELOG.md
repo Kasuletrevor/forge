@@ -6,6 +6,12 @@ The format is based on Keep a Changelog, adapted for the current pre-1.0 release
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-04-29
+
+### Changed
+
+- Extended Forge frontend design tokens with the refreshed palette, typography scale, shadows, and easing values for the next Windows desktop release.
+
 ## [0.2.1] - 2026-04-08
 
 ### Added
